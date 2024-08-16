@@ -3,7 +3,8 @@ import pyfiglet
 
 def get_gradual_rainbow_color(index, total):
     colors = ["red", "yellow", "green", "cyan", "blue", "magenta"]
-    color_index = int((index / total) * (2 * (len(colors) - 1))) % len(colors)
+    gradient_speed = 2.2
+    color_index = int((index / total) * (gradient_speed * (len(colors) - 1))) % len(colors)
     return colors[color_index]
 
 def apply_gradient_to_text(text):
