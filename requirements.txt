@@ -1,0 +1,5 @@
+termcolor
+pyfiglet
+rich
+questionary
+pyyaml

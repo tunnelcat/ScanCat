@@ -1,124 +1,133 @@
-import os, curses
+"""Interactive project setup: detect or create a project, pick scope, and
+make sure each in-scope subfolder has a domains.txt.
 
-# List of folders to check
-folders = ["int", "ext", "wapt"]
+Uses questionary for arrow/spacebar checkbox menus.
+"""
+from pathlib import Path
 
-# Function to check which folders do not exist
-def check_missing_folders():
-    return [folder for folder in folders if not os.path.exists(folder)]
+import questionary
+from termcolor import colored
 
-def display_menu_and_get_selection(missing_folders):
-    selected_folders = []
+from .project import (PROJECT_FILE, DEFAULT_SUBFOLDERS,
+                      load_project, new_project)
 
-    print("\nSelect folders to create (use numbers to toggle selection, Enter to confirm):")
-    
-    for i, folder in enumerate(missing_folders):
-        print(f"{i + 1}. [ ] {folder}")
 
-    while True:
-        choice = input("\nEnter the number of the folder to toggle selection or press Enter to confirm: ").strip()
+def find_project(start_dir="."):
+    """Return the CLIENT folder holding a .scancat.yml, or None.
 
-        if choice == "":
-            break
-        
-        if choice.isdigit():
-            index = int(choice) - 1
-            if 0 <= index < len(missing_folders):
-                folder = missing_folders[index]
-                if folder in selected_folders:
-                    selected_folders.remove(folder)
-                    print(f"{index + 1}. [ ] {folder}")
-                else:
-                    selected_folders.append(folder)
-                    print(f"{index + 1}. [X] {folder}")
-            else:
-                print("Invalid selection. Please enter a valid number.")
+    Checks the current directory first (you are inside a project), then one
+    level of subfolders (the current directory is a workspace of projects).
+    """
+    start = Path(start_dir).resolve()
+    if (start / PROJECT_FILE).exists():
+        return start
+    candidates = [d for d in sorted(start.iterdir())
+                  if d.is_dir() and (d / PROJECT_FILE).exists()]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        choice = questionary.select(
+            "Multiple scancat projects found. Select one:",
+            choices=[d.name for d in candidates],
+        ).ask()
+        return (start / choice) if choice else None
+    return None
+
+
+def ensure_project(start_dir="."):
+    """Detect a project or offer to create one. Returns a loaded Project."""
+    root = find_project(start_dir)
+    if root:
+        proj = load_project(root)
+        print(colored(f"[+] Loaded project: {proj.client}", "green"))
+        return proj
+
+    print(colored("[!] No scancat project found in this directory.", "yellow"))
+    if not questionary.confirm("Create a new project here?", default=True).ask():
+        print("No project. Exiting.")
+        raise SystemExit(1)
+    return create_project(start_dir)
+
+
+def create_project(start_dir="."):
+    client = questionary.text("Client name:").ask()
+    if not client or not client.strip():
+        print("No client name given. Exiting.")
+        raise SystemExit(1)
+    client = client.strip()
+
+    root = Path(start_dir).resolve() / client
+    root.mkdir(parents=True, exist_ok=True)
+    proj = new_project(root, client)
+
+    picked = questionary.checkbox(
+        "Select standard subfolders to create (space to toggle):",
+        choices=[questionary.Choice(s, checked=True) for s in DEFAULT_SUBFOLDERS],
+    ).ask() or []
+
+    extra = questionary.text(
+        "Additional folder names (comma separated, blank to skip):"
+    ).ask() or ""
+    manual = [name.strip() for name in extra.split(",") if name.strip()]
+
+    subfolders = []
+    for name in picked + manual:
+        if name not in subfolders:
+            subfolders.append(name)
+    for name in subfolders:
+        (root / name).mkdir(exist_ok=True)
+
+    proj.subfolders = subfolders
+    proj.scope = list(subfolders)
+    proj.save()
+    print(colored(f"[+] Created project '{client}' with: "
+                  f"{', '.join(subfolders) or '(no subfolders)'}", "green"))
+    return proj
+
+
+def select_scope(proj):
+    """Interactive scope picker. Defaults to the memorized scope (or all)."""
+    available = proj.existing_subfolders()
+    if not available:
+        print(colored("[!] No subfolders in project. Nothing to scope.", "yellow"))
+        return []
+
+    default_scope = proj.scope or available
+    choices = [questionary.Choice(name, checked=(name in default_scope))
+               for name in available]
+    scope = questionary.checkbox(
+        "Select subfolders in scope (space to toggle):", choices=choices
+    ).ask() or []
+
+    proj.scope = scope
+    proj.save()
+    print(colored(f"[+] Scope: [{','.join(scope)}]", "cyan"))
+    return scope
+
+
+def ensure_domains_files(proj, scope, editor_opener):
+    """Ensure each in-scope subfolder has a non-empty domains.txt.
+
+    Prompts to create and edit any that are missing. Returns the subfolders
+    that end up with domains to work on.
+    """
+    active = []
+    for sub in scope:
+        domains_file = proj.subfolder_path(sub) / "domains.txt"
+        has_content = domains_file.exists() and domains_file.read_text().strip()
+
+        if not has_content:
+            print(colored(f"[!] [{sub}] domains.txt is missing or empty.", "yellow"))
+            if questionary.confirm(
+                f"[{sub}] Create and edit domains.txt now?", default=True
+            ).ask():
+                domains_file.parent.mkdir(parents=True, exist_ok=True)
+                domains_file.touch(exist_ok=True)
+                editor_opener(str(domains_file))
+            has_content = domains_file.exists() and domains_file.read_text().strip()
+
+        if has_content:
+            active.append(sub)
         else:
-            print("Invalid input. Please enter a number or press Enter to confirm.")
-
-    return selected_folders
-
-# Main function to handle folder creation
-def folder_select_menu():
-    missing_folders = check_missing_folders()
-
-    if not missing_folders:
-        print("All folders already exist.")
-    else:
-        selected_folders = display_menu_and_get_selection(missing_folders)
-        if selected_folders:
-            for folder in selected_folders:
-                os.makedirs(folder)
-                print(f"Folder '{folder}' created.")
-        else:
-            print("No folders were selected for creation.")
-
-
-# def folder_select_menu(): 
-
-#     # List of folders to check
-#     folders = ["int", "ext", "wapt"]
-
-#     # Function to check and list missing folders
-#     def check_missing_folders():
-#         return [folder for folder in folders if not os.path.exists(folder)]
-
-#     # Function to create the selected folders
-#     def create_folders(selected_folders):
-#         for folder in selected_folders:
-#             os.makedirs(folder)
-#             print(f"Folder '{folder}' created.")
-
-#     # Curses function to handle menu display and selection
-#     def menu(stdscr):
-#         missing_folders = check_missing_folders()
-
-#         if not missing_folders:
-#             stdscr.addstr(0, 0, "All folders already exist.")
-#             stdscr.refresh()
-#             stdscr.getch()
-#             return
-
-#         stdscr.clear()
-#         curses.curs_set(0)  # Hide cursor
-
-#         selected = [False] * len(missing_folders)
-#         current_option = 0
-
-#         while True:
-#             stdscr.clear()
-#             stdscr.addstr(0, 0, "Select folders to create (use space to toggle, Enter to confirm):\n")
-
-#             for idx, folder in enumerate(missing_folders):
-#                 if selected[idx]:
-#                     stdscr.addstr(idx + 2, 2, f"[X] {folder}")
-#                 else:
-#                     stdscr.addstr(idx + 2, 2, f"[ ] {folder}")
-
-#             stdscr.addstr(current_option + 2, 0, ">")
-#             stdscr.refresh()
-
-#             key = stdscr.getch()
-
-#             if key == curses.KEY_UP and current_option > 0:
-#                 current_option -= 1
-#             elif key == curses.KEY_DOWN and current_option < len(missing_folders) - 1:
-#                 current_option += 1
-#             elif key == ord(' '):
-#                 selected[current_option] = not selected[current_option]
-#             elif key == ord('\n'):
-#                 break
-
-#         selected_folders = [folder for idx, folder in enumerate(missing_folders) if selected[idx]]
-
-#         if selected_folders:
-#             create_folders(selected_folders)
-#         else:
-#             stdscr.addstr(len(missing_folders) + 3, 0, "No folders were selected for creation, Enter to continue:")
-#             stdscr.refresh()
-#             stdscr.getch()
-
-#     # Run the menu with curses
-#     curses.wrapper(menu)
-
-
+            print(colored(f"[!] [{sub}] skipped (no domains).", "yellow"))
+    return active
