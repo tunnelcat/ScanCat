@@ -7,6 +7,7 @@ import sys
 from .banner import display_banner
 from .folderselect import ensure_project, select_scope, ensure_domains_files
 from .recon import run_recon
+from .tools import warn_missing_tools
 
 
 def open_editor(file_path):
@@ -41,6 +42,7 @@ def vuln_mode(args, proj):
 
 def main():
     display_banner()
+    warn_missing_tools()
 
     parser = argparse.ArgumentParser(
         description="A tool for recon, scanning, and vulnerability assessment."

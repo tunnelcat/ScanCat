@@ -8,6 +8,7 @@ from pathlib import Path
 import questionary
 from termcolor import colored
 
+from .menu import checkbox
 from .project import (PROJECT_FILE, DEFAULT_SUBFOLDERS,
                       load_project, new_project)
 
@@ -60,10 +61,10 @@ def create_project(start_dir="."):
     root.mkdir(parents=True, exist_ok=True)
     proj = new_project(root, client)
 
-    picked = questionary.checkbox(
-        "Select standard subfolders to create (space to toggle):",
-        choices=[questionary.Choice(s, checked=True) for s in DEFAULT_SUBFOLDERS],
-    ).ask() or []
+    picked = checkbox(
+        "Select standard subfolders to create:",
+        [questionary.Choice(s, checked=True) for s in DEFAULT_SUBFOLDERS],
+    ) or []
 
     extra = questionary.text(
         "Additional folder names (comma separated, blank to skip):"
@@ -95,9 +96,7 @@ def select_scope(proj):
     default_scope = proj.scope or available
     choices = [questionary.Choice(name, checked=(name in default_scope))
                for name in available]
-    scope = questionary.checkbox(
-        "Select subfolders in scope (space to toggle):", choices=choices
-    ).ask() or []
+    scope = checkbox("Select subfolders in scope:", choices) or []
 
     proj.scope = scope
     proj.save()
