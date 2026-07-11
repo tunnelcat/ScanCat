@@ -5,10 +5,11 @@ from .base import ReconModule, Command
 class AmassModule(ReconModule):
     name = "amass"
     binary = "amass"
+    modular_outputs = ["fqdns"]
 
     def build(self, domains_file, module_dir, domains):
-        out = module_dir / "amass-out-recursive.txt"
-        argv = ["amass", "enum", "-active", "-brute",
-                "-min-for-recursive", "2",
-                "-df", str(domains_file), "-o", str(out)]
-        return [Command(argv, reads=[out])]
+        argv = ["amass", "enum", "-v", "-active", "-brute",
+                "-min-for-recursive", "1", "-nocolor",
+                "-timeout", "60",  # TODO - variable timeout
+                "-df", str(domains_file)]
+        return [Command(argv)]

@@ -23,6 +23,7 @@ class LiveDisplay:
         self.tasks = {}          # key -> state dict
         self.order = []          # keys in insertion order
         self.logs = deque(maxlen=500)
+        self.cancelling = False
         self.live = Live(self._render(), console=self.console,
                          refresh_per_second=12, transient=False)
 
@@ -47,6 +48,13 @@ class LiveDisplay:
 
     def stub(self, key):
         self.tasks[key]["state"] = "stub"
+
+    def cancelled(self, key):
+        self.tasks[key]["state"] = "cancelled"
+        self.tasks[key]["end"] = time.monotonic()
+
+    def begin_cancel(self):
+        self.cancelling = True
 
     def log(self, key, line):
         sub, module = key
@@ -82,6 +90,9 @@ class LiveDisplay:
             elif state == "stub":
                 status = Text("·", style="grey50")
                 info = Text("stub - not implemented", style="grey50")
+            elif state == "cancelled":
+                status = Text("✗", style="red")
+                info = Text(f"[{self._runtime(t)}] CANCELLED", style="bold red")
             else:  # pending
                 status = Text("·", style="grey50")
                 info = Text("[--:--]", style="grey50")
@@ -94,8 +105,14 @@ class LiveDisplay:
             log_text.append(line + "\n")
 
         header = Text(f"scancat recon  scope [{self.scope_label}]", style="bold")
+        if self.cancelling:
+            hint = Text("Stopping early... press Ctrl+C again to force quit",
+                       style="bold yellow")
+        else:
+            hint = Text("Ctrl+C to stop early, Ctrl+C again to force quit",
+                       style="grey50")
         rule = Text("─" * 60, style="grey37")
-        return Group(header, table, rule, log_text)
+        return Group(header, table, hint, rule, log_text)
 
     def refresh(self):
         self.live.update(self._render())

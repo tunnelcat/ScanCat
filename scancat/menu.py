@@ -18,7 +18,7 @@ MENU_STYLE = questionary.Style([
     ("instruction", "fg:#808080"),
 ])
 
-INSTRUCTION = ("(↑/↓ move, space to select, "
+INSTRUCTION = ("(↑/↓ or j/k move, space to select, "
                "a = select all/none, enter to confirm)")
 
 
@@ -30,5 +30,5 @@ def checkbox(message, choices):
         pointer="›",
         instruction=INSTRUCTION,
         style=MENU_STYLE,
-        use_jk_keys=False,
+        use_jk_keys=True,
     ).ask()
