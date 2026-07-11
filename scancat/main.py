@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 from .banner import display_banner
-from .folderselect import ensure_project, select_scope, ensure_domains_files
+from .folderselect import ensure_project, select_scope, select_modules, ensure_domains_files
 from .recon import run_recon
 from .tools import warn_missing_tools
 
@@ -20,11 +20,15 @@ def recon_mode(args, proj):
     if not scope:
         print("No subfolders in scope. Nothing to do.")
         return
+    enabled_modules = select_modules(proj)
+    if not enabled_modules:
+        print("No modules selected. Nothing to run.")
+        return
     active = ensure_domains_files(proj, scope, open_editor)
     if not active:
         print("No subfolders have domains. Nothing to run.")
         return
-    asyncio.run(run_recon(proj, active))
+    asyncio.run(run_recon(proj, active, enabled_modules))
 
 
 def scan_mode(args, proj):

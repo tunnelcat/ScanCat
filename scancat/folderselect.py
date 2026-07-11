@@ -11,6 +11,7 @@ from termcolor import colored
 from .menu import checkbox
 from .project import (PROJECT_FILE, DEFAULT_SUBFOLDERS,
                       load_project, new_project)
+from .recon import MODULES
 
 
 def find_project(start_dir="."):
@@ -102,6 +103,21 @@ def select_scope(proj):
     proj.save()
     print(colored(f"[+] Scope: [{','.join(scope)}]", "cyan"))
     return scope
+
+
+def select_modules(proj):
+    """Interactive module picker. Defaults to the memorized selection (or
+    all modules enabled)."""
+    available = [m.name for m in MODULES]
+    default_enabled = proj.enabled_modules or available
+    choices = [questionary.Choice(name, checked=(name in default_enabled))
+               for name in available]
+    enabled = checkbox("Select modules to run:", choices) or []
+
+    proj.enabled_modules = enabled
+    proj.save()
+    print(colored(f"[+] Modules: [{','.join(enabled)}]", "cyan"))
+    return enabled
 
 
 def ensure_domains_files(proj, scope, editor_opener):

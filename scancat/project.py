@@ -1,8 +1,9 @@
 """Scancat project model: the .scancat.yml config and path helpers.
 
 A "project" is a CLIENT folder containing a .scancat.yml file. The yml stores
-the client name, the year/month it was created, the subfolders that exist and
-the subfolders currently in scope (memorized between runs).
+the client name, the year/month it was created, the subfolders that exist,
+the subfolders currently in scope, and the recon modules currently enabled
+(all memorized between runs).
 """
 import datetime
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ class Project:
     month: str            # xx
     subfolders: list = field(default_factory=list)
     scope: list = field(default_factory=list)
+    enabled_modules: list = field(default_factory=list)
 
     @property
     def config_path(self):
@@ -42,6 +44,7 @@ class Project:
             "month": self.month,
             "subfolders": self.subfolders,
             "scope": self.scope,
+            "enabled_modules": self.enabled_modules,
         }
         with open(self.config_path, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
@@ -58,6 +61,7 @@ def load_project(root):
         month=str(data.get("month", "")),
         subfolders=data.get("subfolders", []) or [],
         scope=data.get("scope", []) or [],
+        enabled_modules=data.get("enabled_modules", []) or [],
     )
 
 

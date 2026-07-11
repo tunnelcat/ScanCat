@@ -12,12 +12,11 @@ except ImportError:
     termios = None   # non-POSIX platform; terminal restore becomes a no-op
 
 from .ui import LiveDisplay
-from .plugins.amass import AmassModule
 from .plugins.subfinder import SubfinderModule
 from .plugins.theharvester import TheHarvesterModule
 from .plugins.massdns import MassdnsModule
 
-MODULES = [AmassModule, SubfinderModule, TheHarvesterModule, MassdnsModule]
+MODULES = [SubfinderModule, TheHarvesterModule, MassdnsModule]
 
 
 def _term_snapshot():
@@ -49,14 +48,16 @@ async def _refresh_loop(display):
         pass
 
 
-async def run_recon(proj, scope):
+async def run_recon(proj, scope, enabled_modules=None):
     display = LiveDisplay(",".join(scope))
-    locks = {sub: asyncio.Lock() for sub in scope}   # guards each fqdns-all.txt
     term_attrs = _term_snapshot()
+
+    active_modules = MODULES if enabled_modules is None else \
+        [m for m in MODULES if m.name in enabled_modules]
 
     module_specs = []
     for sub in scope:
-        for module_cls in MODULES:
+        for module_cls in active_modules:
             module = module_cls()
             key = display.add(sub, module.name)
             module_specs.append((module, key, sub))
@@ -64,7 +65,7 @@ async def run_recon(proj, scope):
     try:
         with display:
             refresher = asyncio.create_task(_refresh_loop(display))
-            tasks = [asyncio.create_task(module.run(key, display, proj, sub, locks[sub]))
+            tasks = [asyncio.create_task(module.run(key, display, proj, sub))
                      for module, key, sub in module_specs]
 
             loop = asyncio.get_running_loop()

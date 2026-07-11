@@ -5,7 +5,6 @@ Requirements:
 - nmap
 - massdns
 - theharvester
-- amass
 - nuclei
 - onesixtyone
 - snmp-check

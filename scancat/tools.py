@@ -8,7 +8,6 @@ REQUIRED_TOOLS = {
     "nmap": "nmap",
     "massdns": "massdns",
     "theHarvester": "theharvester",
-    "amass": "amass",
     "subfinder": "subfinder",
     "nuclei": "nuclei",
     "onesixtyone": "onesixtyone",
