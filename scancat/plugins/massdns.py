@@ -6,6 +6,6 @@ class MassdnsModule(ReconModule):
     name = "massdns"
     binary = None  # not wired up yet
 
-    async def run(self, key, display, proj, sub):
+    async def run(self, key, display, proj, sub, lock):
         display.stub(key)
         display.log(key, "massdns module is a stub (not implemented yet)")

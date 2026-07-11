@@ -4,15 +4,56 @@ A module checks that its tool is installed, then runs one or more external
 commands, streaming their output to the live display and a per-module log.
 """
 import asyncio
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
+
+# A valid FQDN/subdomain: one or more dot-separated labels (alphanumeric,
+# hyphens allowed but not leading/trailing) followed by an alphabetic TLD.
+# Rejects wildcards (*.example.com) and other malformed entries.
+FQDN_RE = re.compile(
+    r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$"
+)
 
 
 def read_domains(domains_file):
     """Domains from a domains.txt (strips blanks and # comments)."""
     lines = Path(domains_file).read_text().splitlines()
     return [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
+
+
+def _normalize_fqdns(fqdns):
+    """Lowercase, strip, and filter fqdns to valid subdomains/FQDNs only
+    (rejects wildcards and other malformed entries)."""
+    normalized = set()
+    for f in fqdns:
+        host = f.strip().lower().rstrip(".")
+        if host and FQDN_RE.match(host):
+            normalized.add(host)
+    return normalized
+
+
+def write_fqdns(path, fqdns):
+    """Write fqdns to path, lowercased, sorted, unique, and filtered to
+    valid subdomains/FQDNs only. Overwrites any existing content - use
+    merge_fqdns to add to it instead. Returns the fqdns actually written."""
+    normalized = sorted(_normalize_fqdns(fqdns))
+    Path(path).write_text("\n".join(normalized) + ("\n" if normalized else ""))
+    return normalized
+
+
+def merge_fqdns(path, fqdns):
+    """Add fqdns to path's existing content (so repeated runs accumulate
+    rather than overwrite), then rewrite it lowercased, sorted, and unique.
+    Returns the newly given fqdns, validated and normalized."""
+    path = Path(path)
+    existing = set()
+    if path.exists():
+        existing = {ln.strip() for ln in path.read_text().splitlines() if ln.strip()}
+    new_valid = _normalize_fqdns(fqdns)
+    write_fqdns(path, existing | new_valid)
+    return sorted(new_valid)
 
 
 class Command:
@@ -47,7 +88,13 @@ class ReconModule:
         """Return the list of Command objects to run. Override in subclasses."""
         raise NotImplementedError
 
-    async def run(self, key, display, proj, sub):
+    def parse_output(self, module_dir):
+        """Optional hook: parse this module's raw tool output into a
+        normalized fqdns-<tool>.txt. Override in subclasses; returns the
+        parsed fqdns, or None if this module has nothing to parse."""
+        return None
+
+    async def run(self, key, display, proj, sub, lock):
         if self.binary and shutil.which(self.binary) is None:
             display.missing(key)
             display.log(key, f"[!] '{self.binary}' not found on PATH")
@@ -84,7 +131,8 @@ class ReconModule:
                 try:
                     async for raw in proc.stdout:
                         line = raw.decode(errors="replace").rstrip("\n")
-                        display.log(key, line)
+                        if line.strip():
+                            display.log(key, line)
                         mlog.write(line)
                         if tee:
                             tee.write(line + "\n")
@@ -110,6 +158,12 @@ class ReconModule:
                     if tee:
                         tee.close()
 
+            fqdns = self.parse_output(module_dir)
+            if fqdns is not None:
+                display.log(key, f"parsed {len(fqdns)} fqdns")
+                mlog.write(f"parsed {len(fqdns)} fqdns")
+                async with lock:
+                    merge_fqdns(subfolder_dir / "fqdns-all.txt", fqdns)
             display.done(key)
         finally:
             mlog.close()
