@@ -32,7 +32,11 @@ class LiveDisplay:
         self.logs = deque(maxlen=1000)
         self.cancelling = False
         self.finished = False    # work is over; pane held open for review
-        self.confirm = None      # pending confirmation: None | "stop" | "quit"
+        # pending confirmation: None | "stop" | "quit" | "restart" | "cancel"
+        self.confirm = None
+        self.control = False     # module control mode (navigate/select modules)
+        self.cursor = 0          # highlighted module index in control mode
+        self.selected = set()    # keys checkbox-selected in control mode
         self.output_only = False # hide statuses so output fills the width
         self.copied_at = 0.0     # monotonic time of last clipboard copy
         self.copied_count = 0    # lines in that copy (for the confirmation)
@@ -71,8 +75,46 @@ class LiveDisplay:
     def begin_cancel(self):
         self.cancelling = True
 
-    def finish(self):
-        self.finished = True
+    def reset(self, key):
+        """Return a module to the pending state so it can be re-run."""
+        self.tasks[key].update(state="pending", start=None, end=None)
+
+    # module control mode -------------------------------------------------
+    def enter_control(self):
+        if (self.order and not self.selecting and not self.output_only
+                and self.confirm is None):
+            self.control = True
+            self.cursor = min(self.cursor, len(self.order) - 1)
+            self.selected = set()
+
+    def exit_control(self):
+        self.control = False
+        self.selected = set()
+
+    def cursor_up(self, n=1):
+        if self.control:
+            self.cursor = max(0, self.cursor - n)
+
+    def cursor_down(self, n=1):
+        if self.control:
+            self.cursor = min(len(self.order) - 1, self.cursor + n)
+
+    def toggle_selected(self):
+        if self.control and self.order:
+            self.selected.symmetric_difference_update({self.order[self.cursor]})
+
+    def invert_selection(self):
+        if self.control:
+            self.selected = set(self.order) - self.selected
+
+    def control_targets(self):
+        """Keys the control-mode action applies to: the checkbox selection,
+        or the highlighted module when nothing is checked."""
+        if self.selected:
+            return set(self.selected)
+        if self.control and self.order:
+            return {self.order[self.cursor]}
+        return set()
 
     def log(self, key, line):
         sub, module = key
@@ -87,13 +129,17 @@ class LiveDisplay:
     # selection mode they extend the highlighted range instead. page_up/
     # page_down delegate here, so they inherit the mode-awareness too.
     def scroll_up(self, n=1):
-        if self.selecting:
+        if self.control:
+            self.cursor_up(n)
+        elif self.selecting:
             self._grow_top(n)
         else:
             self.scroll += n
 
     def scroll_down(self, n=1):
-        if self.selecting:
+        if self.control:
+            self.cursor_down(n)
+        elif self.selecting:
             self._grow_bottom(n)
         else:
             self.scroll = max(0, self.scroll - n)
@@ -105,13 +151,17 @@ class LiveDisplay:
         self.scroll_down(max(1, self.view_height - 1))
 
     def scroll_home(self):
-        if self.selecting:
+        if self.control:
+            self.cursor = 0
+        elif self.selecting:
             self._grow_top(len(self.logs))     # extend to the oldest line
         else:
             self.scroll = len(self.logs)       # clamped in _output_pane
 
     def scroll_end(self):
-        if self.selecting:
+        if self.control:
+            self.cursor = max(0, len(self.order) - 1)
+        elif self.selecting:
             self._grow_bottom(len(self.logs))  # extend to the newest line
         else:
             self.scroll = 0                    # back to the live tail
@@ -162,8 +212,10 @@ class LiveDisplay:
     def toggle_output_only(self):
         # Collapse the statuses pane so output spans the full width; then a
         # normal terminal drag-select grabs only output text, not the left
-        # pane. Toggle back to restore the split view.
-        self.output_only = not self.output_only
+        # pane. Toggle back to restore the split view. Disabled in control
+        # mode, which needs the statuses pane visible.
+        if not self.control:
+            self.output_only = not self.output_only
 
     # rendering -----------------------------------------------------------
     def _runtime(self, t):
@@ -176,7 +228,7 @@ class LiveDisplay:
     def _statuses_pane(self):
         frame = SPINNER[int(time.time() * 12) % len(SPINNER)]
         rows = []
-        for key in self.order:
+        for i, key in enumerate(self.order):
             t = self.tasks[key]
             state = t["state"]
             if state == "running":
@@ -198,11 +250,20 @@ class LiveDisplay:
                 status = Text("·", style="grey50")
                 info = Text("[--:--]", style="grey50")
             line = Text()
+            if self.control:
+                # cursor marker + checkbox for navigation/selection
+                line.append("❯ " if i == self.cursor else "  ",
+                           style="bold cyan")
+                checked = key in self.selected
+                line.append("[x] " if checked else "[ ] ",
+                           style="bold cyan" if checked else "grey50")
             line.append_text(status)
             line.append(" ")
             line.append(t["label"], style="bold")
             line.append(" ")
             line.append_text(info)
+            if self.control and i == self.cursor:
+                line.stylize("on grey30")   # highlight the current row
             rows.append(line)
         return Text("\n").join(rows) if rows else Text()
 
@@ -233,17 +294,44 @@ class LiveDisplay:
     def _hint(self):
         # A confirmation prompt takes over the hint line until resolved.
         if self.confirm == "quit":
-            return Text("Exit scancat?   Ctrl+C again = exit    Esc = cancel",
+            return Text("Exit scancat?   Ctrl+C again = exit    Esc/n = cancel",
                        style="bold red")
         if self.confirm == "stop":
-            return Text("Stop all modules early?   y = stop    Esc = cancel",
+            return Text("Stop all modules early?   y = stop    Esc/n = cancel",
                        style="bold yellow")
+        if self.confirm == "restart":
+            n = len(self.control_targets())
+            return Text(f"Restart {n} module(s)?   y = confirm    Esc/n = back",
+                       style="bold yellow")
+        if self.confirm == "cancel":
+            n = len(self.control_targets())
+            return Text(f"Cancel {n} module(s)?   y = confirm    Esc/n = back",
+                       style="bold red")
+
+        # Module control mode: navigate/select modules and act on them.
+        if self.control:
+            m = Text(no_wrap=True, overflow="ellipsis")
+            m.append("MODULES  ", style="bold reverse")
+            m.append("↑/↓ j/k PgUp/PgDn Home/End", style="bold")
+            m.append(" move   ", style="grey50")
+            m.append("Space", style="bold")
+            m.append(" select   ", style="grey50")
+            m.append("i", style="bold")
+            m.append(" invert   ", style="grey50")
+            m.append("r", style="bold")
+            m.append(" restart   ", style="grey50")
+            m.append("c", style="bold")
+            m.append(" cancel   ", style="grey50")
+            m.append("Esc/m", style="bold")
+            m.append(" cancel   ", style="grey50")
+            m.append(f"({len(self.selected)} selected)", style="cyan")
+            return m
 
         # Selection mode takes priority: show its own control set.
         if self.selecting:
             sel = Text(no_wrap=True, overflow="ellipsis")
             sel.append("SELECT  ", style="bold reverse")
-            sel.append("↑/↓ PgUp/PgDn Home/End", style="bold")
+            sel.append("↑/↓ j/k PgUp/PgDn Home/End", style="bold")
             sel.append(" extend   ", style="grey50")
             sel.append("Space", style="bold")
             sel.append(" copy   ", style="grey50")
@@ -267,27 +355,25 @@ class LiveDisplay:
             return Text("nothing to copy yet", style="bold yellow")
 
         hint = Text(no_wrap=True, overflow="ellipsis")
-        hint.append("↑/↓", style="bold")
-        hint.append(" line  ", style="grey50")
-        hint.append("PgUp/PgDn", style="bold")
-        hint.append(" page  ", style="grey50")
-        hint.append("Home/End", style="bold")
-        hint.append(" jump  ", style="grey50")
+        hint.append("↑/↓ j/k PgUp/PgDn Home/End", style="bold")
+        hint.append(" move  ", style="grey50")
         hint.append("Space", style="bold")
         hint.append(" select/copy  ", style="grey50")
         hint.append("Tab", style="bold")
         hint.append(" show statuses  " if self.output_only
                    else " output-only  ", style="grey50")
+        if not self.output_only:
+            hint.append("m", style="bold")
+            hint.append(" modules  ", style="grey50")
+        if not self.finished:
+            hint.append("q", style="bold")
+            hint.append(" stop all  ", style="grey50")
         hint.append("Ctrl+C", style="bold")
         hint.append(" exit", style="grey50")
-        if not self.finished:
-            hint.append("  ", style="grey50")
-            hint.append("q", style="bold")
-            hint.append(" stop early", style="grey50")
-        elif self.cancelling:
+        if self.finished and self.cancelling:
             hint.append("   ■ stopped early - reviewing output",
                        style="bold red")
-        else:
+        elif self.finished:
             hint.append("   ✓ all modules finished - reviewing output",
                        style="bold green")
         if self.scroll > 0:

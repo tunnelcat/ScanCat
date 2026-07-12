@@ -109,6 +109,14 @@ def _install_key_reader(loop, display, handlers):
         (b"Y", handlers["yes"]),
         (b"n", handlers["no"]),
         (b"N", handlers["no"]),
+        (b"m", handlers["control"]),
+        (b"r", handlers["restart"]),
+        (b"c", handlers["cancel_modules"]),
+        (b"i", handlers["invert"]),
+        # j/k mirror the down/up arrows: scroll output, extend a copy
+        # selection, or move the module cursor depending on the active mode.
+        (b"j", display.scroll_down),
+        (b"k", display.scroll_up),
         (b" ", handlers["copy"]),
         (b"\t", display.toggle_output_only),
         (b"\x1b[5~", display.page_up),
@@ -193,19 +201,25 @@ async def run_recon(proj, scope, enabled_modules=None):
     active_modules = MODULES if enabled_modules is None else \
         [m for m in MODULES if m.name in enabled_modules]
 
-    module_specs = []
+    # key -> (module class, subfolder); lets us (re)spawn any module on demand.
+    module_by_key = {}
     for sub in scope:
         for module_cls in active_modules:
-            module = module_cls()
-            key = display.add(sub, module.name)
-            module_specs.append((module, key, sub))
+            key = display.add(sub, module_cls.name)
+            module_by_key[key] = (module_cls, sub)
+
+    tasks = {}   # key -> current asyncio task
+
+    def start_module(key):
+        module_cls, sub = module_by_key[key]
+        tasks[key] = asyncio.create_task(
+            module_cls().run(key, display, proj, sub, locks[sub]))
 
     try:
         with live:
-            tasks = [asyncio.create_task(module.run(key, display, proj, sub, locks[sub]))
-                     for module, key, sub in module_specs]
-
             loop = asyncio.get_running_loop()
+            for key in module_by_key:
+                start_module(key)
 
             def request_cancel():
                 # 'q': graceful stop-early. Cancel running tasks (they wind
@@ -213,10 +227,35 @@ async def run_recon(proj, scope, enabled_modules=None):
                 if display.cancelling:
                     return
                 display.begin_cancel()
-                for (_, key, _), t in zip(module_specs, tasks):
+                for key, t in tasks.items():
                     if display.tasks[key]["state"] == "pending":
                         display.cancelled(key)
                     t.cancel()
+
+            def cancel_modules(keys):
+                # Module control 'c': cancel just these modules.
+                for key in keys:
+                    t = tasks.get(key)
+                    if t and not t.done():
+                        t.cancel()
+
+            async def _restart_keys(keys):
+                # Cancel the selected modules, wait for them to actually stop,
+                # then spawn fresh tasks for each.
+                waiting = [tasks[k] for k in keys
+                          if tasks.get(k) and not tasks[k].done()]
+                for t in waiting:
+                    t.cancel()
+                if waiting:
+                    await asyncio.gather(*waiting, return_exceptions=True)
+                display.cancelling = False
+                for key in keys:
+                    display.reset(key)
+                    start_module(key)
+
+            def restart_modules(keys):
+                # Module control 'r': re-run these modules from scratch.
+                asyncio.create_task(_restart_keys(keys))
 
             def force_exit():
                 # Ctrl+C confirmed: leave immediately. The module tools run in
@@ -243,20 +282,23 @@ async def run_recon(proj, scope, enabled_modules=None):
                 os._exit(130)
 
             def do_copy():
-                # Space: first press enters selection mode (highlighting the
-                # visible window); second press copies the selection and exits.
+                # Space: toggle a module in control mode; otherwise drive the
+                # copy-selection (enter, then copy on the second press).
                 if display.confirm:
                     return
-                if display.selecting:
+                if display.control:
+                    display.toggle_selected()
+                elif display.selecting:
                     _copy_to_clipboard(display.take_selection())
                 else:
                     display.begin_selection()
 
-            # Confirmation dialogs: 'q' and Ctrl+C ask first; y confirms,
-            # Esc/n cancels. A second Ctrl+C while the exit prompt is up
-            # forces the exit (escape hatch if the UI is wedged).
+            # Confirmation dialogs: the triggering key asks first; y confirms
+            # (Ctrl+C again for exit), Esc/n cancels. A second Ctrl+C while the
+            # exit prompt is up forces the exit (escape hatch if UI is wedged).
             def ask_stop():
-                if display.confirm is None and not display.finished:
+                if (display.confirm is None and not display.control
+                        and not display.selecting and not display.finished):
                     display.confirm = "stop"
 
             def ask_quit():
@@ -265,22 +307,48 @@ async def run_recon(proj, scope, enabled_modules=None):
                 else:
                     display.confirm = "quit"
 
+            def ask_restart():
+                if display.control and display.confirm is None \
+                        and display.control_targets():
+                    display.confirm = "restart"
+
+            def ask_cancel_modules():
+                if display.control and display.confirm is None \
+                        and display.control_targets():
+                    display.confirm = "cancel"
+
             def confirm_yes():
-                # 'y' confirms the stop-early prompt only; the exit prompt is
-                # confirmed by a second Ctrl+C (handled in ask_quit).
-                if display.confirm == "stop":
+                # 'y' confirms stop / restart / cancel prompts; the exit prompt
+                # is confirmed by a second Ctrl+C (handled in ask_quit).
+                mode = display.confirm
+                if mode == "stop":
                     display.confirm = None
                     request_cancel()
+                elif mode in ("restart", "cancel"):
+                    targets = display.control_targets()
+                    display.confirm = None
+                    display.exit_control()
+                    (restart_modules if mode == "restart"
+                     else cancel_modules)(targets)
 
             def confirm_no():
                 display.confirm = None
 
             def on_escape():
-                # Esc dismisses a confirm dialog first, else a selection.
+                # Esc backs out of the innermost thing: confirm, then control
+                # mode, then a copy selection.
                 if display.confirm:
                     display.confirm = None
+                elif display.control:
+                    display.exit_control()
                 elif display.selecting:
                     display.cancel_selection()
+
+            def toggle_control():
+                if display.control:
+                    display.exit_control()
+                else:
+                    display.enter_control()
 
             handlers = {
                 "stop": ask_stop,
@@ -288,16 +356,25 @@ async def run_recon(proj, scope, enabled_modules=None):
                 "escape": on_escape,
                 "yes": confirm_yes,
                 "no": confirm_no,
+                "control": toggle_control,
+                "restart": ask_restart,
+                "cancel_modules": ask_cancel_modules,
+                "invert": display.invert_selection,
             }
             loop.add_signal_handler(signal.SIGINT, ask_quit)
             key_cleanup = _install_key_reader(loop, display, handlers)
             try:
-                await asyncio.gather(*tasks, return_exceptions=True)
-                # Work is over (finished or stopped via 'q'). Hold the pane
-                # open so the user can scroll the output for review; only
-                # Ctrl+C (force_exit) leaves.
-                display.finish()
-                await asyncio.Event().wait()
+                # Supervisor: keep the pane alive until Ctrl+C. 'finished' is
+                # derived from task activity so restart/cancel flip it live.
+                while True:
+                    await asyncio.sleep(0.15)
+                    for t in list(tasks.values()):
+                        if t.done():
+                            try:
+                                t.exception()   # retrieve, avoid warnings
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                    display.finished = all(t.done() for t in tasks.values())
             finally:
                 key_cleanup()
                 loop.remove_signal_handler(signal.SIGINT)
