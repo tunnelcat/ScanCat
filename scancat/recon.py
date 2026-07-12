@@ -2,8 +2,11 @@
 concurrently, driving a single live display.
 """
 import asyncio
+import base64
 import os
+import shutil
 import signal
+import subprocess
 import sys
 
 try:
@@ -43,9 +46,50 @@ def _term_restore(attrs):
         pass
 
 
-def _install_key_reader(loop, display, on_cancel):
-    """Put stdin in cbreak mode and dispatch keys: scroll keys drive the
-    display, 'q' requests a graceful stop-early via on_cancel.
+def _osc52_copy(text):
+    """Set the terminal clipboard via the OSC 52 escape sequence. Works over
+    SSH without any external tool; a terminal that doesn't support it (or has
+    it disabled) just ignores the sequence. When running inside tmux the
+    sequence is wrapped in tmux's passthrough so it reaches the outer
+    terminal (needs `set-clipboard on` / `allow-passthrough on`, the tmux
+    3.3+ defaults)."""
+    payload = base64.b64encode(text.encode("utf-8", "replace")).decode("ascii")
+    seq = f"\x1b]52;c;{payload}\x07"
+    if os.environ.get("TMUX"):
+        seq = "\x1bPtmux;" + seq.replace("\x1b", "\x1b\x1b") + "\x1b\\"
+    sys.stdout.write(seq)
+    sys.stdout.flush()
+
+
+# Native clipboard tools tried in order; clip.exe covers WSL, the rest cover
+# Wayland/X11/macOS. First one present wins.
+_CLIP_TOOLS = (
+    ["clip.exe"],
+    ["wl-copy"],
+    ["xclip", "-selection", "clipboard"],
+    ["xsel", "-ib"],
+    ["pbcopy"],
+)
+
+
+def _copy_to_clipboard(text):
+    """Copy via the first available native clipboard tool; fall back to the
+    OSC 52 terminal escape when none is present (e.g. an SSH session)."""
+    data = text.encode("utf-8", "replace")
+    for tool in _CLIP_TOOLS:
+        if shutil.which(tool[0]):
+            try:
+                subprocess.run(tool, input=data, check=False)
+                return
+            except Exception:
+                continue
+    _osc52_copy(text)
+
+
+def _install_key_reader(loop, display, handlers):
+    """Put stdin in cbreak mode and dispatch keys via `handlers` (a dict with
+    'stop', 'copy', 'escape', 'yes', 'no' callbacks); scroll keys drive the
+    display directly. A bare Esc calls handlers['escape'].
 
     Returns a cleanup callable that unregisters the reader (terminal attrs
     are restored separately by _term_restore). No-op without a POSIX TTY.
@@ -56,9 +100,17 @@ def _install_key_reader(loop, display, on_cancel):
     tty.setcbreak(fd)   # raw-ish: no echo/line-buffering, but Ctrl+C still signals
 
     # Byte sequence -> action. Several terminals encode Home/End two ways.
+    # Esc (\x1b) is NOT here: it prefixes every arrow/page sequence, so it's
+    # disambiguated by a short timeout below.
     seqs = [
-        (b"q", on_cancel),
-        (b"Q", on_cancel),
+        (b"q", handlers["stop"]),
+        (b"Q", handlers["stop"]),
+        (b"y", handlers["yes"]),
+        (b"Y", handlers["yes"]),
+        (b"n", handlers["no"]),
+        (b"N", handlers["no"]),
+        (b" ", handlers["copy"]),
+        (b"\t", display.toggle_output_only),
         (b"\x1b[5~", display.page_up),
         (b"\x1b[6~", display.page_down),
         (b"\x1b[A", display.scroll_up),
@@ -70,15 +122,30 @@ def _install_key_reader(loop, display, on_cancel):
         (b"\x1b[4~", display.scroll_end),
         (b"\x1b[8~", display.scroll_end),
     ]
+    on_escape = handlers["escape"]
     buf = bytearray()
+    esc_timer = None
+
+    def flush_escape():
+        # Fired ~60ms after a lone Esc with no follow-up bytes: it was the
+        # Esc key, not the start of an arrow/page sequence.
+        nonlocal esc_timer
+        esc_timer = None
+        if bytes(buf) == b"\x1b":
+            del buf[:]
+            on_escape()
 
     def on_input():
+        nonlocal esc_timer
         try:
             data = os.read(fd, 1024)
         except (BlockingIOError, InterruptedError):
             return
         if not data:
             return
+        if esc_timer is not None:      # new bytes may complete the sequence
+            esc_timer.cancel()
+            esc_timer = None
         buf.extend(data)
         while buf:
             for seq, action in seqs:
@@ -92,10 +159,16 @@ def _install_key_reader(loop, display, on_cancel):
                 if any(s.startswith(bytes(buf)) for s, _ in seqs):
                     break
                 del buf[:1]
+        # A lone Esc is ambiguous with a sequence start: wait briefly, then
+        # treat it as the Esc key if nothing else arrives.
+        if bytes(buf) == b"\x1b":
+            esc_timer = loop.call_later(0.06, flush_escape)
 
     loop.add_reader(fd, on_input)
 
     def cleanup():
+        if esc_timer is not None:
+            esc_timer.cancel()
         try:
             loop.remove_reader(fd)
         except Exception:
@@ -146,8 +219,15 @@ async def run_recon(proj, scope, enabled_modules=None):
                     t.cancel()
 
             def force_exit():
-                # Ctrl+C: leave the pane immediately. os._exit skips all
-                # Python cleanup, so restore the terminal by hand first.
+                # Ctrl+C confirmed: leave immediately. The module tools run in
+                # their own process groups (they survive the terminal's
+                # Ctrl+C), so kill them here to avoid orphans before we go.
+                for proc in list(display.procs):
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                # os._exit skips all Python cleanup, so restore the terminal.
                 try:
                     live.stop()   # tears down the alt-screen, back to normal
                 except Exception:
@@ -162,8 +242,55 @@ async def run_recon(proj, scope, enabled_modules=None):
                 sys.stdout.flush()
                 os._exit(130)
 
-            loop.add_signal_handler(signal.SIGINT, force_exit)
-            key_cleanup = _install_key_reader(loop, display, request_cancel)
+            def do_copy():
+                # Space: first press enters selection mode (highlighting the
+                # visible window); second press copies the selection and exits.
+                if display.confirm:
+                    return
+                if display.selecting:
+                    _copy_to_clipboard(display.take_selection())
+                else:
+                    display.begin_selection()
+
+            # Confirmation dialogs: 'q' and Ctrl+C ask first; y confirms,
+            # Esc/n cancels. A second Ctrl+C while the exit prompt is up
+            # forces the exit (escape hatch if the UI is wedged).
+            def ask_stop():
+                if display.confirm is None and not display.finished:
+                    display.confirm = "stop"
+
+            def ask_quit():
+                if display.confirm == "quit":
+                    force_exit()
+                else:
+                    display.confirm = "quit"
+
+            def confirm_yes():
+                # 'y' confirms the stop-early prompt only; the exit prompt is
+                # confirmed by a second Ctrl+C (handled in ask_quit).
+                if display.confirm == "stop":
+                    display.confirm = None
+                    request_cancel()
+
+            def confirm_no():
+                display.confirm = None
+
+            def on_escape():
+                # Esc dismisses a confirm dialog first, else a selection.
+                if display.confirm:
+                    display.confirm = None
+                elif display.selecting:
+                    display.cancel_selection()
+
+            handlers = {
+                "stop": ask_stop,
+                "copy": do_copy,
+                "escape": on_escape,
+                "yes": confirm_yes,
+                "no": confirm_no,
+            }
+            loop.add_signal_handler(signal.SIGINT, ask_quit)
+            key_cleanup = _install_key_reader(loop, display, handlers)
             try:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 # Work is over (finished or stopped via 'q'). Hold the pane

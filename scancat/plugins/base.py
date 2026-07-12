@@ -119,6 +119,10 @@ class ReconModule:
                         *cmd.argv,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
+                        # Own session/process group so a terminal Ctrl+C
+                        # (sent to the foreground group) doesn't kill the tool
+                        # directly - only scancat's handler decides its fate.
+                        start_new_session=True,
                     )
                 except FileNotFoundError:
                     display.missing(key)
@@ -128,6 +132,7 @@ class ReconModule:
                         tee.close()
                     return
 
+                display.procs.add(proc)
                 try:
                     async for raw in proc.stdout:
                         line = raw.decode(errors="replace").rstrip("\n")
@@ -155,6 +160,7 @@ class ReconModule:
                     display.cancelled(key)
                     raise
                 finally:
+                    display.procs.discard(proc)
                     if tee:
                         tee.close()
 

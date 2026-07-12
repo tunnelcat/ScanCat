@@ -28,9 +28,17 @@ class LiveDisplay:
         self.console = Console()
         self.tasks = {}          # key -> state dict
         self.order = []          # keys in insertion order
+        self.procs = set()       # live subprocesses, for kill-on-force-exit
         self.logs = deque(maxlen=1000)
         self.cancelling = False
         self.finished = False    # work is over; pane held open for review
+        self.confirm = None      # pending confirmation: None | "stop" | "quit"
+        self.output_only = False # hide statuses so output fills the width
+        self.copied_at = 0.0     # monotonic time of last clipboard copy
+        self.copied_count = 0    # lines in that copy (for the confirmation)
+        self.selecting = False   # in visual copy-selection mode
+        self.sel_top = 0         # selection bounds (absolute log indices)
+        self.sel_bot = 0
         self.scroll = 0          # output lines scrolled back from the tail
         self.view_height = 20    # visible output rows; set each render
 
@@ -74,12 +82,21 @@ class LiveDisplay:
         if self.scroll > 0:
             self.scroll += 1
 
-    # scrolling -----------------------------------------------------------
+    # scrolling / selection ----------------------------------------------
+    # The nav keys do double duty: normally they scroll the output; in
+    # selection mode they extend the highlighted range instead. page_up/
+    # page_down delegate here, so they inherit the mode-awareness too.
     def scroll_up(self, n=1):
-        self.scroll += n
+        if self.selecting:
+            self._grow_top(n)
+        else:
+            self.scroll += n
 
     def scroll_down(self, n=1):
-        self.scroll = max(0, self.scroll - n)
+        if self.selecting:
+            self._grow_bottom(n)
+        else:
+            self.scroll = max(0, self.scroll - n)
 
     def page_up(self):
         self.scroll_up(max(1, self.view_height - 1))
@@ -88,10 +105,65 @@ class LiveDisplay:
         self.scroll_down(max(1, self.view_height - 1))
 
     def scroll_home(self):
-        self.scroll = len(self.logs)   # clamped to oldest line in _output_pane
+        if self.selecting:
+            self._grow_top(len(self.logs))     # extend to the oldest line
+        else:
+            self.scroll = len(self.logs)       # clamped in _output_pane
 
     def scroll_end(self):
-        self.scroll = 0                # back to the live tail
+        if self.selecting:
+            self._grow_bottom(len(self.logs))  # extend to the newest line
+        else:
+            self.scroll = 0                    # back to the live tail
+
+    def _grow_top(self, n):
+        self.sel_top = max(0, self.sel_top - n)
+        self._scroll_to_show(self.sel_top, at_bottom=False)
+
+    def _grow_bottom(self, n):
+        self.sel_bot = min(len(self.logs) - 1, self.sel_bot + n)
+        self._scroll_to_show(self.sel_bot, at_bottom=True)
+
+    def _scroll_to_show(self, idx, at_bottom):
+        """Scroll so absolute log index `idx` sits at the bottom (or top) of
+        the visible window, keeping the moving selection edge on screen."""
+        n, h = len(self.logs), self.view_height
+        target = (n - 1 - idx) if at_bottom else (n - h - idx)
+        self.scroll = max(0, min(target, max(0, n - h)))
+
+    def begin_selection(self):
+        """Enter copy-selection mode with the current visible window selected."""
+        n = len(self.logs)
+        if n == 0:
+            self.copied_at = time.monotonic()   # flash "nothing to copy"
+            self.copied_count = 0
+            return
+        h = self.view_height
+        self.scroll = max(0, min(self.scroll, max(0, n - h)))
+        end = n - self.scroll
+        self.sel_top = max(0, end - h)
+        self.sel_bot = end - 1
+        self.selecting = True
+
+    def take_selection(self):
+        """Exit selection mode and return the selected lines as text."""
+        items = list(self.logs)
+        chosen = items[self.sel_top:self.sel_bot + 1]
+        self.selecting = False
+        self.copied_at = time.monotonic()
+        self.copied_count = len(chosen)
+        return "\n".join(f"[{sub}][{module}] {line}"
+                        for sub, module, line in chosen)
+
+    def cancel_selection(self):
+        """Leave selection mode without copying (Esc)."""
+        self.selecting = False
+
+    def toggle_output_only(self):
+        # Collapse the statuses pane so output spans the full width; then a
+        # normal terminal drag-select grabs only output text, not the left
+        # pane. Toggle back to restore the split view.
+        self.output_only = not self.output_only
 
     # rendering -----------------------------------------------------------
     def _runtime(self, t):
@@ -144,25 +216,68 @@ class LiveDisplay:
         start = max(0, end - height)
         recent = list(self.logs)[start:end]
         rows = [Text() for _ in range(height - len(recent))]
-        for sub, module, line in recent:
-            t = Text()
-            t.append(f"[{sub}]", style="cyan")
-            t.append(f"[{module}] ", style="magenta")
-            t.append(line)
-            rows.append(t)
+        for offset, (sub, module, line) in enumerate(recent):
+            idx = start + offset
+            if self.selecting and self.sel_top <= idx <= self.sel_bot:
+                # Selected lines render as a solid highlight bar (reverse
+                # video) so the range is unmistakable across themes.
+                rows.append(Text(f"[{sub}][{module}] {line}", style="reverse"))
+            else:
+                t = Text()
+                t.append(f"[{sub}]", style="cyan")
+                t.append(f"[{module}] ", style="magenta")
+                t.append(line)
+                rows.append(t)
         return Text("\n").join(rows)
 
     def _hint(self):
+        # A confirmation prompt takes over the hint line until resolved.
+        if self.confirm == "quit":
+            return Text("Exit scancat?   Ctrl+C again = exit    Esc = cancel",
+                       style="bold red")
+        if self.confirm == "stop":
+            return Text("Stop all modules early?   y = stop    Esc = cancel",
+                       style="bold yellow")
+
+        # Selection mode takes priority: show its own control set.
+        if self.selecting:
+            sel = Text(no_wrap=True, overflow="ellipsis")
+            sel.append("SELECT  ", style="bold reverse")
+            sel.append("↑/↓ PgUp/PgDn Home/End", style="bold")
+            sel.append(" extend   ", style="grey50")
+            sel.append("Space", style="bold")
+            sel.append(" copy   ", style="grey50")
+            sel.append("Esc", style="bold")
+            sel.append(" cancel   ", style="grey50")
+            sel.append(f"({self.sel_bot - self.sel_top + 1} lines)",
+                      style="cyan")
+            return sel
+
         # Mid-cancel (tasks still winding down): a prominent single message.
         if self.cancelling and not self.finished:
             return Text("Stopping early... press Ctrl+C to exit now",
                        style="bold yellow")
+
+        # A copy just happened: flash a confirmation for ~2s (auto-refresh
+        # clears it). copied_count == 0 means there was nothing to copy.
+        if self.copied_at and time.monotonic() - self.copied_at < 2.0:
+            if self.copied_count:
+                return Text(f"✓ copied {self.copied_count} lines to clipboard",
+                           style="bold green")
+            return Text("nothing to copy yet", style="bold yellow")
 
         hint = Text(no_wrap=True, overflow="ellipsis")
         hint.append("↑/↓", style="bold")
         hint.append(" line  ", style="grey50")
         hint.append("PgUp/PgDn", style="bold")
         hint.append(" page  ", style="grey50")
+        hint.append("Home/End", style="bold")
+        hint.append(" jump  ", style="grey50")
+        hint.append("Space", style="bold")
+        hint.append(" select/copy  ", style="grey50")
+        hint.append("Tab", style="bold")
+        hint.append(" show statuses  " if self.output_only
+                   else " output-only  ", style="grey50")
         hint.append("Ctrl+C", style="bold")
         hint.append(" exit", style="grey50")
         if not self.finished:
@@ -195,11 +310,18 @@ class LiveDisplay:
         # no_wrap keeps every entry to a single row so the output stays
         # bottom-anchored and the frame height stays constant; long lines
         # are truncated with an ellipsis rather than wrapping.
-        panes.add_column("MODULES", ratio=1, vertical="top",
-                        no_wrap=True, overflow="ellipsis")
-        panes.add_column("OUTPUT", ratio=3, vertical="top",
-                        no_wrap=True, overflow="ellipsis")
-        panes.add_row(self._statuses_pane(), self._output_pane(height))
+        output = self._output_pane(height)
+        if self.output_only:
+            # Single full-width column: a plain line-select copies only output.
+            panes.add_column("OUTPUT", ratio=1, vertical="top",
+                            no_wrap=True, overflow="ellipsis")
+            panes.add_row(output)
+        else:
+            panes.add_column("MODULES", ratio=1, vertical="top",
+                            no_wrap=True, overflow="ellipsis")
+            panes.add_column("OUTPUT", ratio=3, vertical="top",
+                            no_wrap=True, overflow="ellipsis")
+            panes.add_row(self._statuses_pane(), output)
 
         return Group(header, panes, hint)
 
