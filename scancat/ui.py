@@ -28,7 +28,8 @@ class LiveDisplay:
         self.console = Console()
         self.tasks = {}          # key -> state dict
         self.order = []          # keys in insertion order
-        self.procs = set()       # live subprocesses, for kill-on-force-exit
+        self.procs = {}          # key -> live subprocess (kill/pause target)
+        self.paused = set()      # keys whose process is stopped (SIGSTOP)
         self.logs = deque(maxlen=1000)
         self.cancelling = False
         self.finished = False    # work is over; pane held open for review
@@ -50,34 +51,63 @@ class LiveDisplay:
     def add(self, sub, module):
         key = (sub, module)
         self.tasks[key] = {"state": "pending", "start": None, "end": None,
-                           "label": f"[{sub}][{module}]"}
+                           "label": f"[{sub}][{module}]",
+                           "paused_at": None, "paused_accum": 0.0}
         self.order.append(key)
         return key
+
+    def waiting(self, key):
+        """Queued behind a dependency; not yet started."""
+        self.tasks[key]["state"] = "waiting"
 
     def start(self, key):
         self.tasks[key]["state"] = "running"
         self.tasks[key]["start"] = time.monotonic()
 
     def done(self, key):
+        self._finalize_pause(key)
         self.tasks[key]["state"] = "done"
         self.tasks[key]["end"] = time.monotonic()
+        self.paused.discard(key)
 
     def missing(self, key):
         self.tasks[key]["state"] = "missing"
+        self.paused.discard(key)
 
     def stub(self, key):
         self.tasks[key]["state"] = "stub"
 
     def cancelled(self, key):
+        self._finalize_pause(key)
         self.tasks[key]["state"] = "cancelled"
         self.tasks[key]["end"] = time.monotonic()
+        self.paused.discard(key)
 
     def begin_cancel(self):
         self.cancelling = True
 
+    # pause bookkeeping: freeze a module's runtime clock while it's stopped,
+    # so the displayed mm:ss counts active time only, not time spent paused.
+    def _finalize_pause(self, key):
+        t = self.tasks[key]
+        if t["paused_at"] is not None:
+            t["paused_accum"] += time.monotonic() - t["paused_at"]
+            t["paused_at"] = None
+
+    def pause_task(self, key):
+        self.paused.add(key)
+        if self.tasks[key]["paused_at"] is None:
+            self.tasks[key]["paused_at"] = time.monotonic()
+
+    def resume_task(self, key):
+        self._finalize_pause(key)
+        self.paused.discard(key)
+
     def reset(self, key):
         """Return a module to the pending state so it can be re-run."""
-        self.tasks[key].update(state="pending", start=None, end=None)
+        self.tasks[key].update(state="pending", start=None, end=None,
+                              paused_at=None, paused_accum=0.0)
+        self.paused.discard(key)
 
     # module control mode -------------------------------------------------
     def enter_control(self):
@@ -222,7 +252,10 @@ class LiveDisplay:
         if t["start"] is None:
             return "--:--"
         end = t["end"] if t["end"] is not None else time.monotonic()
-        secs = int(end - t["start"])
+        paused = t["paused_accum"]
+        if t["paused_at"] is not None:      # currently paused: freeze the clock
+            paused += end - t["paused_at"]
+        secs = max(0, int(end - t["start"] - paused))
         return f"{secs // 60:02d}:{secs % 60:02d}"
 
     def _statuses_pane(self):
@@ -231,7 +264,10 @@ class LiveDisplay:
         for i, key in enumerate(self.order):
             t = self.tasks[key]
             state = t["state"]
-            if state == "running":
+            if state == "running" and key in self.paused:
+                status = Text("‖", style="bold yellow")
+                info = Text(f"[{self._runtime(t)}] PAUSED", style="bold yellow")
+            elif state == "running":
                 status = Text(frame, style="cyan")
                 info = Text(f"[{self._runtime(t)}]", style="cyan")
             elif state == "done":
@@ -240,6 +276,9 @@ class LiveDisplay:
             elif state == "missing":
                 status = Text("[!]", style="yellow")
                 info = Text("missing", style="yellow")
+            elif state == "waiting":
+                status = Text("·", style="grey50")
+                info = Text("waiting", style="blue")
             elif state == "stub":
                 status = Text("·", style="grey50")
                 info = Text("stub", style="grey50")
@@ -322,6 +361,8 @@ class LiveDisplay:
             m.append(" restart   ", style="grey50")
             m.append("c", style="bold")
             m.append(" cancel   ", style="grey50")
+            m.append("p", style="bold")
+            m.append(" pause   ", style="grey50")
             m.append("Esc/m", style="bold")
             m.append(" cancel   ", style="grey50")
             m.append(f"({len(self.selected)} selected)", style="cyan")
@@ -422,6 +463,7 @@ class LiveDisplay:
         "cancelled": ("✗", "stopped",     "red"),
         "running":   ("…", "interrupted", "yellow"),
         "missing":   ("[!]", "missing",   "yellow"),
+        "waiting":   ("·", "not run",     "grey50"),
         "stub":      ("·", "stub",        "grey50"),
         "pending":   ("·", "not run",     "grey50"),
     }

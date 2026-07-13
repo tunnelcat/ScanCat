@@ -6,7 +6,7 @@ from termcolor import colored
 # command that must be on PATH -> package name to install
 REQUIRED_TOOLS = {
     "nmap": "nmap",
-    "massdns": "massdns",
+    "dnsx": "dnsx",
     "theHarvester": "theharvester",
     "subfinder": "subfinder",
     "nuclei": "nuclei",

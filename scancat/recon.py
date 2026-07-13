@@ -21,9 +21,9 @@ from rich.live import Live
 from .ui import LiveDisplay
 from .plugins.subfinder import SubfinderModule
 from .plugins.theharvester import TheHarvesterModule
-from .plugins.massdns import MassdnsModule
+from .plugins.dnsx import DnsxModule
 
-MODULES = [SubfinderModule, TheHarvesterModule, MassdnsModule]
+MODULES = [SubfinderModule, TheHarvesterModule, DnsxModule]
 
 
 def _term_snapshot():
@@ -112,6 +112,7 @@ def _install_key_reader(loop, display, handlers):
         (b"m", handlers["control"]),
         (b"r", handlers["restart"]),
         (b"c", handlers["cancel_modules"]),
+        (b"p", handlers["pause"]),
         (b"i", handlers["invert"]),
         # j/k mirror the down/up arrows: scroll output, extend a copy
         # selection, or move the module cursor depending on the active mode.
@@ -215,11 +216,37 @@ async def run_recon(proj, scope, enabled_modules=None):
         tasks[key] = asyncio.create_task(
             module_cls().run(key, display, proj, sub, locks[sub]))
 
+    def _deps_ready(key):
+        # A deferred module is ready once every module of its awaited class(es)
+        # in the SAME subfolder has settled (its task is done, whether it
+        # completed, was cancelled, or was missing).
+        module_cls, sub = module_by_key[key]
+        need = set(module_cls.depends_on)
+        if not need:
+            return True
+        for okey, (ocls, osub) in module_by_key.items():
+            if osub == sub and need.intersection(ocls.module_class):
+                t = tasks.get(okey)
+                if t is None or not t.done():
+                    return False
+        return True
+
+    def _settled(key):
+        # Terminal for the 'finished' review state: a reached end-state, or a
+        # started task that is done (covers a crash that left no end-state).
+        if display.tasks[key]["state"] in ("done", "cancelled", "missing", "stub"):
+            return True
+        t = tasks.get(key)
+        return t is not None and t.done()
+
     try:
         with live:
             loop = asyncio.get_running_loop()
-            for key in module_by_key:
-                start_module(key)
+            for key, (module_cls, sub) in module_by_key.items():
+                if module_cls.depends_on:
+                    display.waiting(key)     # queued behind its dependencies
+                else:
+                    start_module(key)
 
             def request_cancel():
                 # 'q': graceful stop-early. Cancel running tasks (they wind
@@ -227,10 +254,14 @@ async def run_recon(proj, scope, enabled_modules=None):
                 if display.cancelling:
                     return
                 display.begin_cancel()
-                for key, t in tasks.items():
-                    if display.tasks[key]["state"] == "pending":
-                        display.cancelled(key)
-                    t.cancel()
+                for key in module_by_key:
+                    t = tasks.get(key)
+                    if t is None:
+                        display.cancelled(key)   # queued module, never started
+                    else:
+                        if display.tasks[key]["state"] == "pending":
+                            display.cancelled(key)
+                        t.cancel()
 
             def cancel_modules(keys):
                 # Module control 'c': cancel just these modules.
@@ -238,6 +269,24 @@ async def run_recon(proj, scope, enabled_modules=None):
                     t = tasks.get(key)
                     if t and not t.done():
                         t.cancel()
+                    elif t is None and display.tasks[key]["state"] == "waiting":
+                        display.cancelled(key)   # cancel a still-queued module
+
+            def pause_modules(keys):
+                # Module control 'p': toggle pause (SIGSTOP) / resume (SIGCONT)
+                # on each module's process group. No-op if it isn't running.
+                for key in keys:
+                    proc = display.procs.get(key)
+                    if proc is None:
+                        continue
+                    pause = key not in display.paused
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                        os.killpg(pgid, signal.SIGSTOP if pause else signal.SIGCONT)
+                    except (ProcessLookupError, OSError):
+                        display.resume_task(key)   # clear stale paused state
+                        continue
+                    (display.pause_task if pause else display.resume_task)(key)
 
             async def _restart_keys(keys):
                 # Cancel the selected modules, wait for them to actually stop,
@@ -261,7 +310,7 @@ async def run_recon(proj, scope, enabled_modules=None):
                 # Ctrl+C confirmed: leave immediately. The module tools run in
                 # their own process groups (they survive the terminal's
                 # Ctrl+C), so kill them here to avoid orphans before we go.
-                for proc in list(display.procs):
+                for proc in list(display.procs.values()):
                     try:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                     except (ProcessLookupError, PermissionError, OSError):
@@ -350,6 +399,11 @@ async def run_recon(proj, scope, enabled_modules=None):
                 else:
                     display.enter_control()
 
+            def do_pause():
+                # 'p': pause/resume the targeted modules (immediate, no prompt).
+                if display.control and display.confirm is None:
+                    pause_modules(display.control_targets())
+
             handlers = {
                 "stop": ask_stop,
                 "copy": do_copy,
@@ -359,22 +413,30 @@ async def run_recon(proj, scope, enabled_modules=None):
                 "control": toggle_control,
                 "restart": ask_restart,
                 "cancel_modules": ask_cancel_modules,
+                "pause": do_pause,
                 "invert": display.invert_selection,
             }
             loop.add_signal_handler(signal.SIGINT, ask_quit)
             key_cleanup = _install_key_reader(loop, display, handlers)
             try:
-                # Supervisor: keep the pane alive until Ctrl+C. 'finished' is
-                # derived from task activity so restart/cancel flip it live.
+                # Supervisor: start deferred modules once their dependencies
+                # settle, keep the pane alive until Ctrl+C, and derive the
+                # 'finished' review state so restart/cancel flip it live.
                 while True:
                     await asyncio.sleep(0.15)
+                    if not display.cancelling:
+                        for key in module_by_key:
+                            if (key not in tasks
+                                    and display.tasks[key]["state"] == "waiting"
+                                    and _deps_ready(key)):
+                                start_module(key)
                     for t in list(tasks.values()):
                         if t.done():
                             try:
                                 t.exception()   # retrieve, avoid warnings
                             except (asyncio.CancelledError, Exception):
                                 pass
-                    display.finished = all(t.done() for t in tasks.values())
+                    display.finished = all(_settled(k) for k in module_by_key)
             finally:
                 key_cleanup()
                 loop.remove_signal_handler(signal.SIGINT)

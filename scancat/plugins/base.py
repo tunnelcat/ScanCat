@@ -4,8 +4,10 @@ A module checks that its tool is installed, then runs one or more external
 commands, streaming their output to the live display and a per-module log.
 """
 import asyncio
+import os
 import re
 import shutil
+import signal
 from datetime import datetime
 from pathlib import Path
 
@@ -56,6 +58,25 @@ def merge_fqdns(path, fqdns):
     return sorted(new_valid)
 
 
+def merge_resp(path, host_ips):
+    """Accumulate a `host ip,ip` file: merge {host: {ips}} into path's
+    existing content, unioning the A records per host. Written one line per
+    host, sorted by host with sorted IPs. Sets give uniqueness; the single
+    sort at write time is the only ordering pass."""
+    path = Path(path)
+    merged = {}
+    if path.exists():
+        for ln in path.read_text().splitlines():
+            host, _, ips = ln.strip().partition(" ")
+            if host:
+                merged[host] = set(filter(None, ips.split(",")))
+    for host, ips in host_ips.items():
+        merged.setdefault(host, set()).update(ips)
+    lines = [f"{host} {','.join(sorted(ips))}"
+            for host, ips in sorted(merged.items()) if ips]   # skip valueless
+    path.write_text("\n".join(lines) + ("\n" if lines else ""))
+
+
 class Command:
     """One external command to run.
 
@@ -82,7 +103,10 @@ class ModuleLog:
 
 class ReconModule:
     name = "base"
-    binary = None   # external tool required on PATH (None = no check)
+    binary = None       # external tool required on PATH (None = no check)
+    module_class = []   # category tags, e.g. ["subdomains"], ["dns"]
+    depends_on = []     # class tags that must finish (in the same subfolder)
+                        # before this module runs; [] = start immediately
 
     def build(self, domains_file, module_dir, domains):
         """Return the list of Command objects to run. Override in subclasses."""
@@ -132,7 +156,7 @@ class ReconModule:
                         tee.close()
                     return
 
-                display.procs.add(proc)
+                display.procs[key] = proc
                 try:
                     async for raw in proc.stdout:
                         line = raw.decode(errors="replace").rstrip("\n")
@@ -146,6 +170,12 @@ class ReconModule:
                         mlog.write(f"[!] exited with code {proc.returncode}")
                         display.log(key, f"[!] exited with code {proc.returncode}")
                 except asyncio.CancelledError:
+                    # Resume first, in case the module was paused (SIGSTOP):
+                    # a stopped process can't act on SIGTERM until continued.
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGCONT)
+                    except (ProcessLookupError, OSError):
+                        pass
                     try:
                         proc.terminate()
                     except ProcessLookupError:
@@ -160,7 +190,7 @@ class ReconModule:
                     display.cancelled(key)
                     raise
                 finally:
-                    display.procs.discard(proc)
+                    display.procs.pop(key, None)
                     if tee:
                         tee.close()
 

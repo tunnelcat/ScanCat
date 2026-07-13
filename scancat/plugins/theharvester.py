@@ -9,6 +9,7 @@ SOURCES = ("all")
 class TheHarvesterModule(ReconModule):
     name = "theharvester"
     binary = "theHarvester"
+    module_class = ["subdomains"]
 
     def build(self, domains_file, module_dir, domains):
         commands = []
