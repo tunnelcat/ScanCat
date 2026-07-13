@@ -4,12 +4,15 @@ A module checks that its tool is installed, then runs one or more external
 commands, streaming their output to the live display and a per-module log.
 """
 import asyncio
+import ipaddress
 import os
 import re
 import shutil
 import signal
 from datetime import datetime
 from pathlib import Path
+
+from ..store import SubfolderStore
 
 # A valid FQDN/subdomain: one or more dot-separated labels (alphanumeric,
 # hyphens allowed but not leading/trailing) followed by an alphabetic TLD.
@@ -25,56 +28,22 @@ def read_domains(domains_file):
     return [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
 
 
-def _normalize_fqdns(fqdns):
-    """Lowercase, strip, and filter fqdns to valid subdomains/FQDNs only
-    (rejects wildcards and other malformed entries)."""
-    normalized = set()
-    for f in fqdns:
-        host = f.strip().lower().rstrip(".")
-        if host and FQDN_RE.match(host):
-            normalized.add(host)
-    return normalized
+def normalize_host(host):
+    """Lowercase/strip a hostname and return it only if it's a valid FQDN
+    (rejects wildcards and malformed entries); otherwise None. Adapters use
+    this so only clean domains reach the datastore."""
+    if not host:
+        return None
+    host = host.strip().lower().rstrip(".")
+    return host if host and FQDN_RE.match(host) else None
 
 
-def write_fqdns(path, fqdns):
-    """Write fqdns to path, lowercased, sorted, unique, and filtered to
-    valid subdomains/FQDNs only. Overwrites any existing content - use
-    merge_fqdns to add to it instead. Returns the fqdns actually written."""
-    normalized = sorted(_normalize_fqdns(fqdns))
-    Path(path).write_text("\n".join(normalized) + ("\n" if normalized else ""))
-    return normalized
-
-
-def merge_fqdns(path, fqdns):
-    """Add fqdns to path's existing content (so repeated runs accumulate
-    rather than overwrite), then rewrite it lowercased, sorted, and unique.
-    Returns the newly given fqdns, validated and normalized."""
-    path = Path(path)
-    existing = set()
-    if path.exists():
-        existing = {ln.strip() for ln in path.read_text().splitlines() if ln.strip()}
-    new_valid = _normalize_fqdns(fqdns)
-    write_fqdns(path, existing | new_valid)
-    return sorted(new_valid)
-
-
-def merge_resp(path, host_ips):
-    """Accumulate a `host ip,ip` file: merge {host: {ips}} into path's
-    existing content, unioning the A records per host. Written one line per
-    host, sorted by host with sorted IPs. Sets give uniqueness; the single
-    sort at write time is the only ordering pass."""
-    path = Path(path)
-    merged = {}
-    if path.exists():
-        for ln in path.read_text().splitlines():
-            host, _, ips = ln.strip().partition(" ")
-            if host:
-                merged[host] = set(filter(None, ips.split(",")))
-    for host, ips in host_ips.items():
-        merged.setdefault(host, set()).update(ips)
-    lines = [f"{host} {','.join(sorted(ips))}"
-            for host, ips in sorted(merged.items()) if ips]   # skip valueless
-    path.write_text("\n".join(lines) + ("\n" if lines else ""))
+def ip_version(addr):
+    """4 or 6 for a valid IP string, else None."""
+    try:
+        return ipaddress.ip_address(addr).version
+    except ValueError:
+        return None
 
 
 class Command:
@@ -104,19 +73,21 @@ class ModuleLog:
 class ReconModule:
     name = "base"
     binary = None       # external tool required on PATH (None = no check)
-    module_class = []   # category tags, e.g. ["subdomains"], ["dns"]
-    depends_on = []     # class tags that must finish (in the same subfolder)
-                        # before this module runs; [] = start immediately
+    module_class = "recon"   # pipeline phase: "recon" | "scan" | "vuln"
+    out_datatypes = []       # data-type tags produced, e.g. ["host"]
+    depends_on = []          # out_datatype tags that must finish (same
+                             # subfolder) before this runs; [] = start now
 
     def build(self, domains_file, module_dir, domains):
         """Return the list of Command objects to run. Override in subclasses."""
         raise NotImplementedError
 
-    def parse_output(self, module_dir):
-        """Optional hook: parse this module's raw tool output into a
-        normalized fqdns-<tool>.txt. Override in subclasses; returns the
-        parsed fqdns, or None if this module has nothing to parse."""
-        return None
+    def adapt(self, module_dir):
+        """Adapter hook: normalize this module's raw tool output (json/txt/xml)
+        into the common intermediate schema (see scancat.store), which run()
+        then upserts into the subfolder datastore. Override in subclasses;
+        return {} when there's nothing to contribute."""
+        return {}
 
     async def run(self, key, display, proj, sub, lock):
         if self.binary and shutil.which(self.binary) is None:
@@ -194,12 +165,16 @@ class ReconModule:
                     if tee:
                         tee.close()
 
-            fqdns = self.parse_output(module_dir)
-            if fqdns is not None:
-                display.log(key, f"parsed {len(fqdns)} fqdns")
-                mlog.write(f"parsed {len(fqdns)} fqdns")
+            # Adapter: normalize raw output, then upsert into the subfolder
+            # datastore. The lock serializes writes to the shared scancat.db.
+            records = self.adapt(module_dir)
+            if records:
                 async with lock:
-                    merge_fqdns(subfolder_dir / "fqdns-all.txt", fqdns)
+                    store = SubfolderStore(subfolder_dir / "scancat.db")
+                    store.init()
+                    count = store.upsert(records, tool=self.name)
+                display.log(key, f"upserted {count} records")
+                mlog.write(f"upserted {count} records")
             display.done(key)
         finally:
             mlog.close()

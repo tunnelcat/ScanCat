@@ -196,7 +196,7 @@ async def run_recon(proj, scope, enabled_modules=None):
     # and restores the terminal's prior contents on exit.
     live = Live(display, console=display.console, auto_refresh=True,
                 refresh_per_second=12, transient=False, screen=True)
-    locks = {sub: asyncio.Lock() for sub in scope}   # guards each fqdns-all.txt
+    locks = {sub: asyncio.Lock() for sub in scope}   # serializes each scancat.db
     term_attrs = _term_snapshot()
 
     active_modules = MODULES if enabled_modules is None else \
@@ -225,7 +225,7 @@ async def run_recon(proj, scope, enabled_modules=None):
         if not need:
             return True
         for okey, (ocls, osub) in module_by_key.items():
-            if osub == sub and need.intersection(ocls.module_class):
+            if osub == sub and need.intersection(ocls.out_datatypes):
                 t = tasks.get(okey)
                 if t is None or not t.done():
                     return False

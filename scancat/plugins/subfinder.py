@@ -1,25 +1,25 @@
 """subfinder passive subdomain enumeration."""
 import json
 
-from .base import ReconModule, Command, merge_fqdns
+from .base import ReconModule, Command, normalize_host
 
 
 class SubfinderModule(ReconModule):
     name = "subfinder"
     binary = "subfinder"
-    module_class = ["subdomains"]
+    out_datatypes = ["host"]
 
     def build(self, domains_file, module_dir, domains):
         argv = ["subfinder", "-silent", "-nc", "-all", "-dL", str(domains_file),
                 "-oJ", "-o", str(module_dir / "subfinder-out.json")]
         return [Command(argv)]
 
-    def parse_output(self, module_dir):
+    def adapt(self, module_dir):
         out_file = module_dir / "subfinder-out.json"
         if not out_file.exists():
-            return None
+            return {}
 
-        hosts = set()
+        hosts = []
         for line in out_file.read_text().splitlines():
             line = line.strip()
             if not line:
@@ -28,8 +28,7 @@ class SubfinderModule(ReconModule):
                 data = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            host = data.get("host")
+            host = normalize_host(data.get("host"))
             if host:
-                hosts.add(host)
-
-        return merge_fqdns(module_dir / "fqdns-subfinder.txt", hosts)
+                hosts.append({"name": host})
+        return {"hosts": hosts}

@@ -1,7 +1,7 @@
 """theHarvester OSINT recon, run once per domain."""
 import json
 
-from .base import ReconModule, Command, merge_fqdns
+from .base import ReconModule, Command, normalize_host, ip_version
 
 SOURCES = ("all")
 
@@ -9,7 +9,7 @@ SOURCES = ("all")
 class TheHarvesterModule(ReconModule):
     name = "theharvester"
     binary = "theHarvester"
-    module_class = ["subdomains"]
+    out_datatypes = ["host"]
 
     def build(self, domains_file, module_dir, domains):
         commands = []
@@ -20,17 +20,40 @@ class TheHarvesterModule(ReconModule):
             commands.append(Command(argv))
         return commands
 
-    def parse_output(self, module_dir):
-        hosts = set()
+    def adapt(self, module_dir):
+        # Deduplication is the datastore's job (unique keys + upsert), so this
+        # just emits every valid record it sees.
+        hosts, ips, dns, emails = [], [], [], []
+
+        def add_ip(addr):
+            ver = ip_version(addr)
+            if ver:
+                ips.append({"address": addr, "version": ver})
+            return ver
+
         for out_file in module_dir.glob("theHarvester-*.json"):
             try:
                 data = json.loads(out_file.read_text())
             except (json.JSONDecodeError, OSError):
                 continue
             for entry in data.get("hosts", []):
-                # entries may be "host" or "host:ip"/"host:ipv6" - keep the hostname
-                host = entry.split(":", 1)[0]
-                if host:
-                    hosts.add(host)
+                # entries may be "host", "host:ip", or "host:ipv6"
+                host_part, _, ip_part = entry.partition(":")
+                host = normalize_host(host_part)
+                if not host:
+                    continue
+                hosts.append({"name": host})
+                ip = ip_part.strip()
+                if ip:
+                    ver = add_ip(ip)
+                    if ver:
+                        rtype = "A" if ver == 4 else "AAAA"
+                        dns.append({"host": host, "type": rtype, "value": ip})
+            for addr in data.get("ips", []):
+                add_ip(addr.strip())
+            for em in data.get("emails", []):
+                em = em.strip().lower()
+                if em and "@" in em:
+                    emails.append({"address": em})
 
-        return merge_fqdns(module_dir / "fqdns-theHarvester.txt", hosts)
+        return {"hosts": hosts, "ips": ips, "dns": dns, "emails": emails}
