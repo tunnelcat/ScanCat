@@ -319,12 +319,12 @@ def cmd_scope(args, proj):
             _scope_rm(proj, sub, phase, args.value)
 
 
-def _warn(sub, msg):
-    print(f"[{sub}] error: {msg}", file=sys.stderr)
+def _warn(tag, msg):
+    print(f"[{tag}] error: {msg}", file=sys.stderr)
 
 
-def _notify(sub, msg):
-    print(f"[{sub}] warning: {msg}", file=sys.stderr)
+def _notify(tag, msg):
+    print(f"[{tag}] warning: {msg}", file=sys.stderr)
 
 
 def _store_for(proj, sub):
@@ -375,11 +375,12 @@ def _target_subs(proj, args, existing, allow_all):
 
 def _scope_add(proj, sub, phase, values, include, note):
     store = _store_for(proj, sub)
+    tag = f"{sub}/{phase}"
     new = []
     for raw in values:
         result, error = parse_target(raw)
         if not result:
-            _warn(sub, error)
+            _warn(tag, error)
             continue
         kind, value, start_ip, end_ip = result
         new.append(_entry(kind, value, include, start_ip, end_ip, note))
@@ -391,7 +392,7 @@ def _scope_add(proj, sub, phase, values, include, note):
                        r["end_ip"], r["note"]) for r in store.scope_active(phase)]
     final, warnings = normalize_scope(existing + new)
     for w in warnings:
-        _notify(sub, w)
+        _notify(tag, w)
     added, removed = store.scope_reconcile(phase, final)
     verb = "in scope" if include else "excluded"
     print(f"[{sub}/{phase}] {verb}: +{added} -{removed}")
@@ -399,10 +400,11 @@ def _scope_add(proj, sub, phase, values, include, note):
 
 def _scope_rm(proj, sub, phase, values):
     store = _store_for(proj, sub)
+    tag = f"{sub}/{phase}"
     for raw in values:
         result, error = parse_target(raw)
         if not result:
-            _warn(sub, error)
+            _warn(tag, error)
             continue
         kind, value, _s, _e = result
         n = store.scope_disable(phase, kind, value)
@@ -421,11 +423,12 @@ def _scope_edit(proj, sub, phase):
             entries, invalid = parse_scope_text(f.read())
     finally:
         os.unlink(tmp)
+    tag = f"{sub}/{phase}"
     for lineno, error in invalid:
-        _warn(sub, f"line {lineno}: {error}")
+        _warn(tag, f"line {lineno}: {error}")
     final, warnings = normalize_scope(entries)
     for w in warnings:
-        _notify(sub, w)
+        _notify(tag, w)
     added, removed = store.scope_reconcile(phase, final)
     msg = (f"[{sub}/{phase}] scope updated: +{added} -{removed}, "
            f"{len(final)} active")
