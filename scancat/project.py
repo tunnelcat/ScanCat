@@ -12,7 +12,20 @@ from pathlib import Path
 import yaml
 
 PROJECT_FILE = ".scancat.yml"
-DEFAULT_SUBFOLDERS = ["int", "ext", "wapt"]
+DEFAULT_SUBFOLDERS = ["ext", "int", "wapt"]
+
+# Hostname globs skipped by `scancat scope expand` - infrastructure endpoints
+# (mostly Microsoft 365) that are noise for a pentest. Editable per project.
+DEFAULT_SCAN_NOISE = [
+    "autodiscover.*",
+    "lyncdiscover.*",
+    "sip.*",
+    "enterpriseregistration.*",
+    "enterpriseenrollment.*",
+    "msoid.*",
+    "*._domainkey.*",
+    "_dmarc.*",
+]
 
 
 @dataclass
@@ -24,6 +37,8 @@ class Project:
     subfolders: list = field(default_factory=list)
     scope: list = field(default_factory=list)
     enabled_modules: list = field(default_factory=list)
+    scan_noise: list = field(
+        default_factory=lambda: list(DEFAULT_SCAN_NOISE))
 
     @property
     def config_path(self):
@@ -45,6 +60,7 @@ class Project:
             "subfolders": self.subfolders,
             "scope": self.scope,
             "enabled_modules": self.enabled_modules,
+            "scan_noise": self.scan_noise,
         }
         with open(self.config_path, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
@@ -62,6 +78,7 @@ def load_project(root):
         subfolders=data.get("subfolders", []) or [],
         scope=data.get("scope", []) or [],
         enabled_modules=data.get("enabled_modules", []) or [],
+        scan_noise=(data.get("scan_noise") or list(DEFAULT_SCAN_NOISE)),
     )
 
 

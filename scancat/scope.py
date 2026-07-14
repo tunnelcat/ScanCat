@@ -6,12 +6,20 @@ CIDR, or IP range, classified automatically from a single line of text.
 Entries can be marked as exclusions and are soft-deleted (never purged) so the
 engagement keeps an audit trail.
 
-Two entry paths, both keeping the DB authoritative:
-  * `scancat scope add/rm/exclude/list` - quick atomic edits.
-  * `scancat scope edit` - dumps the current scope to a temp file, opens
-    $EDITOR, and reconciles by diff on save (added lines inserted, removed
-    lines soft-deleted, unchanged lines left alone).
+Scope is split by phase (given explicitly on every command):
+  * recon - the seed domains subfinder/dnsx expand.
+  * scan  - the hosts/IPs nmap actually targets, usually built from recon
+            discoveries via `scancat scope expand`, then pruned.
+
+Entry paths, all keeping the DB authoritative:
+  * `scancat scope add/rm/exclude/list --phase P` - quick atomic edits.
+  * `scancat scope edit --phase P` - dumps the phase's scope to a temp file,
+    opens $EDITOR, and reconciles by diff on save.
+  * `scancat scope expand` - pulls discovered hosts into the scan phase
+    (resolvable-only, minus scan_noise, by default).
+  * `scancat scope import --from P --to Q` - copies scope entries between phases.
 """
+import fnmatch
 import ipaddress
 import os
 import re
@@ -103,7 +111,7 @@ def _bounds(a, b):
 
 
 EDIT_HEADER = """\
-# scancat scope for [{sub}]
+# scancat {phase} scope for [{sub}]
 #
 # One target per line. The kind is detected automatically:
 #   example.com               a domain
@@ -125,9 +133,9 @@ EDIT_HEADER = """\
 """
 
 
-def render_scope_text(sub, entries):
+def render_scope_text(sub, phase, entries):
     """Render active scope entries to editable text for `scope edit`."""
-    lines = [EDIT_HEADER.format(sub=sub)]
+    lines = [EDIT_HEADER.format(sub=sub, phase=phase)]
     for group, want_include in (("in scope", True), ("exclusions", False)):
         rows = [e for e in entries if bool(e["include"]) == want_include]
         if not rows:
@@ -183,23 +191,39 @@ def cmd_scope(args, proj):
         return
     action = args.scope_cmd
 
+    if action == "expand":
+        # expand only ever targets the scan phase, from recon discoveries.
+        for sub in _target_subs(proj, args, existing, allow_all=False):
+            _scope_expand(proj, sub,
+                          include_unresolvable=args.include_unresolvable_hosts,
+                          include_noise=args.include_scan_noise)
+        return
+
+    if action == "import":
+        if args.from_phase == args.to_phase:
+            raise SystemExit("--from and --to must be different phases")
+        for sub in _target_subs(proj, args, existing, allow_all=False):
+            _scope_import(proj, sub, args.from_phase, args.to_phase)
+        return
+
+    phase = args.phase   # required on every other scope command
     if action == "list":
         for sub in _target_subs(proj, args, existing, allow_all=True):
-            _print_scope(sub, _store_for(proj, sub))
+            _print_scope(sub, _store_for(proj, sub), phase)
         return
 
     subs = _target_subs(proj, args, existing, allow_all=False)
     if action == "edit":
         if len(subs) != 1:
             raise SystemExit("scope edit works on one subfolder; use --sub SUB.")
-        _scope_edit(proj, subs[0])
+        _scope_edit(proj, subs[0], phase)
     elif action in ("add", "exclude"):
         for sub in subs:
-            _scope_add(proj, sub, args.value, include=(action == "add"),
-                       note=args.note)
+            _scope_add(proj, sub, phase, args.value,
+                       include=(action == "add"), note=args.note)
     elif action == "rm":
         for sub in subs:
-            _scope_rm(proj, sub, args.value)
+            _scope_rm(proj, sub, phase, args.value)
 
 
 def _warn(sub, msg):
@@ -214,22 +238,22 @@ def _store_for(proj, sub):
 
 
 def ensure_scope(proj, subfolders):
-    """For each in-scope subfolder, make sure it has domain targets to work on.
-    Any without are offered the scope editor. Returns the subfolders that end
-    up with in-scope domains (what recon can actually run against)."""
+    """For each in-scope subfolder, make sure it has recon-phase domains to work
+    on. Any without are offered the scope editor. Returns the subfolders that
+    end up with recon domains (what recon can actually run against)."""
     active = []
     for sub in subfolders:
         store = _store_for(proj, sub)
-        if not store.scope_domains():
-            print(f"[!] [{sub}] has no domains in scope.")
-            if questionary.confirm(f"[{sub}] Edit scope now?",
+        if not store.scope_domains("recon"):
+            print(f"[!] [{sub}] has no domains in the recon scope.")
+            if questionary.confirm(f"[{sub}] Edit recon scope now?",
                                    default=True).ask():
-                _scope_edit(proj, sub)
-        if store.scope_domains():
+                _scope_edit(proj, sub, "recon")
+        if store.scope_domains("recon"):
             active.append(sub)
         else:
             print(f"[!] [{sub}] skipped - set targets with "
-                  f"'scancat scope add <target> --sub {sub}'")
+                  f"'scancat scope add <target> --phase recon --sub {sub}'")
     return active
 
 
@@ -252,7 +276,7 @@ def _target_subs(proj, args, existing, allow_all):
                      f"(choices: {', '.join(existing)}).")
 
 
-def _scope_add(proj, sub, values, include, note):
+def _scope_add(proj, sub, phase, values, include, note):
     store = _store_for(proj, sub)
     for raw in values:
         result, error = parse_target(raw)
@@ -260,12 +284,13 @@ def _scope_add(proj, sub, values, include, note):
             _warn(sub, error)
             continue
         kind, value, start_ip, end_ip = result
-        store.scope_set(kind, value, include=include, note=note,
+        store.scope_set(phase, kind, value, include=include, note=note,
                         start_ip=start_ip, end_ip=end_ip)
-        print(f"[{sub}] {'in scope' if include else 'excluded'}: {kind} {value}")
+        verb = "in scope" if include else "excluded"
+        print(f"[{sub}/{phase}] {verb}: {kind} {value}")
 
 
-def _scope_rm(proj, sub, values):
+def _scope_rm(proj, sub, phase, values):
     store = _store_for(proj, sub)
     for raw in values:
         result, error = parse_target(raw)
@@ -273,16 +298,17 @@ def _scope_rm(proj, sub, values):
             _warn(sub, error)
             continue
         kind, value, _s, _e = result
-        n = store.scope_disable(kind, value)
-        print(f"[{sub}] {'removed' if n else 'not in scope'}: {kind} {value}")
+        n = store.scope_disable(phase, kind, value)
+        state = "removed" if n else "not in scope"
+        print(f"[{sub}/{phase}] {state}: {kind} {value}")
 
 
-def _scope_edit(proj, sub):
+def _scope_edit(proj, sub, phase):
     store = _store_for(proj, sub)
-    fd, tmp = tempfile.mkstemp(prefix=f"scancat-scope-{sub}-", suffix=".txt")
+    fd, tmp = tempfile.mkstemp(prefix=f"scancat-scope-{sub}-{phase}-", suffix=".txt")
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(render_scope_text(sub, store.scope_active()))
+            f.write(render_scope_text(sub, phase, store.scope_active(phase)))
         subprocess.call([os.environ.get("EDITOR", "nano"), tmp])
         with open(tmp) as f:
             desired, invalid = parse_scope_text(f.read())
@@ -290,19 +316,74 @@ def _scope_edit(proj, sub):
         os.unlink(tmp)
     for lineno, error in invalid:
         _warn(sub, f"line {lineno}: {error}")
-    added, removed = store.scope_reconcile(desired)
-    msg = f"[{sub}] scope updated: +{added} -{removed}, {len(desired)} active"
+    added, removed = store.scope_reconcile(phase, desired)
+    msg = (f"[{sub}/{phase}] scope updated: +{added} -{removed}, "
+           f"{len(desired)} active")
     if invalid:
         msg += f", {len(invalid)} invalid line(s) skipped"
     print(msg)
 
 
-def _print_scope(sub, store):
-    rows = store.scope_active()
+def _scope_expand(proj, sub, include_unresolvable, include_noise):
+    """Pull recon-discovered hosts into the subfolder's scan scope. Skips hosts
+    already curated into scan scope (in any state, so removals aren't undone),
+    non-resolvable hosts (unless include_unresolvable), and scan_noise matches
+    (unless include_noise)."""
+    store = _store_for(proj, sub)
+    existing = store.scope_values("scan")
+    patterns = [] if include_noise else proj.scan_noise
+
+    added = skipped_noise = skipped_unresolvable = skipped_existing = 0
+    for host, resolvable in store.discovered_hosts():
+        if host in existing:
+            skipped_existing += 1
+            continue
+        if any(fnmatch.fnmatch(host, pat) for pat in patterns):
+            skipped_noise += 1
+            continue
+        if not include_unresolvable and resolvable != 1:
+            skipped_unresolvable += 1
+            continue
+        store.scope_set("scan", "domain", host)
+        added += 1
+
+    parts = [f"added {added}"]
+    if skipped_noise:
+        parts.append(f"skipped {skipped_noise} (scan_noise)")
+    if skipped_unresolvable:
+        parts.append(f"skipped {skipped_unresolvable} (unresolvable)")
+    if skipped_existing:
+        parts.append(f"skipped {skipped_existing} (already in scan scope)")
+    print(f"[{sub}/scan] expand: " + ", ".join(parts))
+
+
+def _scope_import(proj, sub, from_phase, to_phase):
+    """Copy active scope entries (targets and exclusions, with their notes)
+    from one phase into another. Values already present in the destination
+    (in any state) are skipped, so a re-import doesn't undo curation there."""
+    store = _store_for(proj, sub)
+    existing = store.scope_values(to_phase)
+    added = skipped = 0
+    for r in store.scope_active(from_phase):
+        if r["value"] in existing:
+            skipped += 1
+            continue
+        store.scope_set(to_phase, r["kind"], r["value"],
+                        include=bool(r["include"]), note=r["note"],
+                        start_ip=r["start_ip"], end_ip=r["end_ip"])
+        added += 1
+    parts = [f"added {added}"]
+    if skipped:
+        parts.append(f"skipped {skipped} (already in {to_phase} scope)")
+    print(f"[{sub}/{to_phase}] import from {from_phase}: " + ", ".join(parts))
+
+
+def _print_scope(sub, store, phase):
+    rows = store.scope_active(phase)
     if not rows:
-        print(f"[{sub}] (no scope)")
+        print(f"[{sub}/{phase}] (no scope)")
         return
-    print(f"[{sub}]")
+    print(f"[{sub}/{phase}]")
     for r in rows:
         mark = " " if r["include"] else "!"
         note = f"    # {r['note']}" if r["note"] else ""

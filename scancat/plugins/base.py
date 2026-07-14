@@ -125,9 +125,10 @@ class ReconModule:
         subfolder_dir = proj.subfolder_path(sub)
         module_dir = subfolder_dir / self.name
         module_dir.mkdir(parents=True, exist_ok=True)
-        # Scope in scancat.db is the sole source of truth for targets.
+        # Scope in scancat.db is the sole source of truth for targets; a module
+        # reads its own phase (recon modules -> the recon scope).
         store = SubfolderStore(subfolder_dir / "scancat.db")
-        domains = store.scope_domains()
+        domains = store.scope_domains(self.module_class)
 
         mlog = ModuleLog(module_dir / f"{self.name}.log")
         mlog.write(f"=== {self.name} started ===")

@@ -70,16 +70,17 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 CREATE TABLE IF NOT EXISTS scope (
     id         INTEGER PRIMARY KEY,
+    phase      TEXT NOT NULL,      -- 'recon' (seed domains) | 'scan' (nmap targets)
     kind       TEXT NOT NULL,      -- 'domain'|'ip'|'cidr'|'range'
     value      TEXT NOT NULL,      -- canonical form the modules consume
     include    INTEGER NOT NULL DEFAULT 1,  -- 1 = in-scope, 0 = exclusion
     enabled    INTEGER NOT NULL DEFAULT 1,  -- 0 = soft-deleted (kept for audit)
     note       TEXT,
     start_ip   INTEGER,            -- IPv4 numeric bounds for containment tests;
-    end_ip     INTEGER,            --   NULL for domains/asn and IPv6
+    end_ip     INTEGER,            --   NULL for domains and IPv6
     added_at   TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(kind, value, include)
+    UNIQUE(phase, kind, value, include)
 );
 """
 
@@ -108,9 +109,32 @@ class SubfolderStore:
         return conn
 
     def init(self):
-        """Create the schema if it doesn't exist. Idempotent."""
+        """Create the schema if it doesn't exist. Idempotent. Also upgrades a
+        pre-phase scope table (tagging its rows 'recon')."""
         with self._connect() as conn:
-            conn.executescript(SCHEMA)
+            self._rename_legacy_scope(conn)   # pre-phase scope -> scope_legacy
+            conn.executescript(SCHEMA)         # (re)create scope + other tables
+            self._absorb_legacy_scope(conn)    # copy legacy rows in, drop it
+
+    @staticmethod
+    def _rename_legacy_scope(conn):
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(scope)")]
+        legacy = [r[1] for r in conn.execute("PRAGMA table_info(scope_legacy)")]
+        if cols and "phase" not in cols and not legacy:
+            conn.execute("ALTER TABLE scope RENAME TO scope_legacy")
+
+    @staticmethod
+    def _absorb_legacy_scope(conn):
+        if not [r[1] for r in conn.execute("PRAGMA table_info(scope_legacy)")]:
+            return
+        conn.executescript("""
+            INSERT OR IGNORE INTO scope
+                (id, phase, kind, value, include, enabled, note,
+                 start_ip, end_ip, added_at, updated_at)
+            SELECT id, 'recon', kind, value, include, enabled, note,
+                   start_ip, end_ip, added_at, updated_at FROM scope_legacy;
+            DROP TABLE scope_legacy;
+        """)
 
     def host_names(self):
         """All known host names, sorted. Empty if the db doesn't exist yet."""
@@ -196,61 +220,81 @@ class SubfolderStore:
     # user owns. Removing an entry soft-deletes it (enabled=0) so a pentest
     # keeps an audit trail of what was in scope when; nothing is ever purged.
 
-    def scope_set(self, kind, value, include=True, note=None,
+    def scope_set(self, phase, kind, value, include=True, note=None,
                   start_ip=None, end_ip=None, when=None):
-        """Insert a scope entry, or re-enable/update it if it already exists.
-        Returns the row id."""
+        """Insert a scope entry in `phase`, or re-enable/update it if it already
+        exists. Returns the row id."""
         when = when or _now()
         with self._connect() as conn:
             row = conn.execute(
-                """INSERT INTO scope (kind, value, include, enabled, note,
+                """INSERT INTO scope (phase, kind, value, include, enabled, note,
                         start_ip, end_ip, added_at, updated_at)
-                   VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
-                   ON CONFLICT(kind, value, include) DO UPDATE SET
+                   VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                   ON CONFLICT(phase, kind, value, include) DO UPDATE SET
                        enabled    = 1,
                        note       = COALESCE(excluded.note, scope.note),
                        updated_at = excluded.updated_at
                    RETURNING id""",
-                (kind, value, 1 if include else 0, note,
+                (phase, kind, value, 1 if include else 0, note,
                  start_ip, end_ip, when, when)).fetchone()
             return row[0]
 
-    def scope_disable(self, kind, value, include=None, when=None):
-        """Soft-delete matching scope entries (set enabled=0). With include
-        left None, disables both the in-scope and exclusion variants. Returns
-        the number of rows affected."""
+    def scope_disable(self, phase, kind, value, include=None, when=None):
+        """Soft-delete matching scope entries in `phase` (set enabled=0). With
+        include left None, disables both the in-scope and exclusion variants.
+        Returns the number of rows affected."""
         when = when or _now()
         sql = ("UPDATE scope SET enabled=0, updated_at=? "
-               "WHERE kind=? AND value=? AND enabled=1")
-        params = [when, kind, value]
+               "WHERE phase=? AND kind=? AND value=? AND enabled=1")
+        params = [when, phase, kind, value]
         if include is not None:
             sql += " AND include=?"
             params.append(1 if include else 0)
         with self._connect() as conn:
             return conn.execute(sql, params).rowcount
 
-    def scope_active(self):
-        """Enabled scope entries as dict rows (includes first, then kind/value)."""
+    def scope_active(self, phase):
+        """Enabled scope entries in `phase` as dict rows (includes first)."""
         if not self.path.exists():
             return []
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             return [dict(r) for r in conn.execute(
-                "SELECT * FROM scope WHERE enabled=1 "
-                "ORDER BY include DESC, kind, value")]
+                "SELECT * FROM scope WHERE phase=? AND enabled=1 "
+                "ORDER BY include DESC, kind, value", (phase,))]
 
-    def scope_domains(self):
-        """Active in-scope domain values, for subdomain/DNS seeding."""
+    def scope_domains(self, phase):
+        """Active in-scope domain values in `phase`, for subdomain/DNS seeding."""
         if not self.path.exists():
             return []
         with self._connect() as conn:
             return [r[0] for r in conn.execute(
                 "SELECT value FROM scope "
-                "WHERE kind='domain' AND include=1 AND enabled=1 "
-                "ORDER BY value")]
+                "WHERE phase=? AND kind='domain' AND include=1 AND enabled=1 "
+                "ORDER BY value", (phase,))]
 
-    def scope_reconcile(self, desired, when=None):
-        """Reconcile the active scope to `desired` (an iterable of
+    def scope_values(self, phase):
+        """Every value already present in `phase`, in any state (enabled or not,
+        include or exclude). Used by expand to avoid re-adding a host the user
+        already curated (or deliberately removed) from that phase."""
+        if not self.path.exists():
+            return set()
+        with self._connect() as conn:
+            return {r[0] for r in conn.execute(
+                "SELECT value FROM scope WHERE phase=?", (phase,))}
+
+    def discovered_hosts(self):
+        """All hosts discovered by recon as (name, resolvable) rows sorted by
+        name. resolvable is 1 (resolved NOERROR), 0 (did not resolve), or None
+        (never checked); only 1 is worth scanning by default."""
+        if not self.path.exists():
+            return []
+        with self._connect() as conn:
+            return [(r[0], r[1]) for r in conn.execute(
+                "SELECT name, resolvable FROM hosts ORDER BY name")]
+
+    def scope_reconcile(self, phase, desired, when=None):
+        """Reconcile the active scope in `phase` to `desired` (an iterable of
         (kind, value, include, start_ip, end_ip, note)): each desired entry is
         inserted or re-enabled with its note (the edit is authoritative for
         notes), and active entries absent from `desired` are soft-deleted.
@@ -258,21 +302,23 @@ class SubfolderStore:
         when = when or _now()
         desired = list(desired)
         want = {(k, v, 1 if inc else 0) for k, v, inc, *_ in desired}
-        have = {(r["kind"], r["value"], r["include"]) for r in self.scope_active()}
+        have = {(r["kind"], r["value"], r["include"])
+                for r in self.scope_active(phase)}
         add, remove = want - have, have - want
         with self._connect() as conn:
             for k, v, inc, start_ip, end_ip, note in desired:
                 conn.execute(
-                    """INSERT INTO scope (kind, value, include, enabled, note,
-                            start_ip, end_ip, added_at, updated_at)
-                       VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
-                       ON CONFLICT(kind, value, include) DO UPDATE SET
+                    """INSERT INTO scope (phase, kind, value, include, enabled,
+                            note, start_ip, end_ip, added_at, updated_at)
+                       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                       ON CONFLICT(phase, kind, value, include) DO UPDATE SET
                            enabled=1, note=excluded.note,
                            updated_at=excluded.updated_at""",
-                    (k, v, 1 if inc else 0, note, start_ip, end_ip, when, when))
+                    (phase, k, v, 1 if inc else 0, note,
+                     start_ip, end_ip, when, when))
             for k, v, inc in remove:
                 conn.execute(
                     "UPDATE scope SET enabled=0, updated_at=? "
-                    "WHERE kind=? AND value=? AND include=?",
-                    (when, k, v, inc))
+                    "WHERE phase=? AND kind=? AND value=? AND include=?",
+                    (when, phase, k, v, inc))
         return (len(add), len(remove))
