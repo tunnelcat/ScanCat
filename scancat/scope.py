@@ -150,11 +150,11 @@ def render_scope_text(sub, phase, entries):
 
 
 def parse_scope_text(text):
-    """Parse edited scope text into (desired, invalid): desired is a list of
-    (kind, value, include, start_ip, end_ip, note) tuples, invalid is a list of
-    (line_number, error) for lines that didn't classify. A leading '!' marks an
-    exclusion; text after a '#' on the line is the note."""
-    desired, invalid, seen = [], [], set()
+    """Parse edited scope text into (entries, invalid): entries is a list of
+    entry dicts (with a 1-based lineno, not yet deduped/merged), invalid is a
+    list of (line_number, error) for lines that didn't classify. A leading '!'
+    marks an exclusion; text after a '#' on the line is the note."""
+    entries, invalid = [], []
     for lineno, raw in enumerate(text.splitlines(), 1):
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue                       # blank or full-line comment
@@ -171,12 +171,105 @@ def parse_scope_text(text):
             invalid.append((lineno, error))
             continue
         kind, value, start_ip, end_ip = result
-        key = (kind, value, include)
+        entries.append(_entry(kind, value, include, start_ip, end_ip,
+                              note or None, lineno))
+    return entries, invalid
+
+
+def _entry(kind, value, include, start_ip, end_ip, note, lineno=None):
+    return {"kind": kind, "value": value, "include": int(bool(include)),
+            "start_ip": start_ip, "end_ip": end_ip, "note": note,
+            "lineno": lineno}
+
+
+# --- deduplication + overlap merging -----------------------------------------
+# IP/CIDR/range entries carry an integer address interval; domains don't. We
+# dedup exact repeats (domains included) and, within a phase+include group,
+# collapse overlapping intervals into one encompassing entry, warning about
+# everything we change (with line numbers when the entry came from `scope edit`).
+
+def _interval(kind, value):
+    """(version, lo, hi) integer address interval for an ip/cidr/range value.
+    Works for both IPv4 and IPv6 (Python ints are unbounded)."""
+    if kind == "ip":
+        ip = ipaddress.ip_address(value)
+        return ip.version, int(ip), int(ip)
+    if kind == "cidr":
+        net = ipaddress.ip_network(value, strict=False)
+        return net.version, int(net.network_address), int(net.broadcast_address)
+    lo, hi = value.split("-", 1)
+    a, b = ipaddress.ip_address(lo), ipaddress.ip_address(hi)
+    return a.version, int(a), int(b)
+
+
+def _canonical_span(lo, hi, version):
+    """Represent the interval [lo, hi] as (kind, value, start_ip, end_ip): a
+    single CIDR when it's exactly one aligned network, an ip when lo==hi, else
+    a range. start/end bounds are stored only for IPv4."""
+    first, last = ipaddress.ip_address(lo), ipaddress.ip_address(hi)
+    start, end = (lo, hi) if version == 4 else (None, None)
+    if lo == hi:
+        return "ip", str(first), start, end
+    nets = list(ipaddress.summarize_address_range(first, last))
+    if len(nets) == 1:
+        return "cidr", str(nets[0]), start, end
+    return "range", f"{first}-{last}", start, end
+
+
+def _loc(e):
+    return f"{e['value']}" + (f" (line {e['lineno']})" if e["lineno"] else "")
+
+
+def _merge_ip_overlaps(entries):
+    """Collapse overlapping ip/cidr/range entries (per include + IP version).
+    Returns (result_entries, warnings)."""
+    result, warnings = [], []
+    groups = {}
+    for e in entries:
+        version, lo, hi = _interval(e["kind"], e["value"])
+        groups.setdefault((e["include"], version), []).append((lo, hi, e))
+
+    for (include, version), items in groups.items():
+        clusters = []
+        for lo, hi, e in sorted(items, key=lambda t: (t[0], t[1])):
+            if clusters and lo <= clusters[-1]["hi"]:   # overlaps current cluster
+                c = clusters[-1]
+                c["members"].append(e)
+                c["hi"] = max(c["hi"], hi)
+            else:
+                clusters.append({"lo": lo, "hi": hi, "members": [e]})
+        for c in clusters:
+            if len(c["members"]) == 1:
+                result.append(c["members"][0])
+                continue
+            kind, value, start, end = _canonical_span(c["lo"], c["hi"], version)
+            note = next((m["note"] for m in c["members"] if m["note"]), None)
+            result.append(_entry(kind, value, include, start, end, note))
+            listed = ", ".join(_loc(m) for m in c["members"])
+            warnings.append(f"overlap: merged {listed} -> {value}")
+    return result, warnings
+
+
+def normalize_scope(entries):
+    """Dedup and overlap-merge a list of entry dicts. Returns (final, warnings)
+    where final is a list of (kind, value, include, start_ip, end_ip, note)
+    tuples ready for scope_reconcile."""
+    warnings, seen, unique = [], set(), []
+    for e in entries:
+        key = (e["kind"], e["value"], e["include"])
         if key in seen:
+            warnings.append(f"duplicate {_loc(e)} - skipped")
             continue
         seen.add(key)
-        desired.append((kind, value, include, start_ip, end_ip, note or None))
-    return desired, invalid
+        unique.append(e)
+
+    iplike = [e for e in unique if e["kind"] in ("ip", "cidr", "range")]
+    others = [e for e in unique if e["kind"] not in ("ip", "cidr", "range")]
+    merged, mwarn = _merge_ip_overlaps(iplike)
+    warnings.extend(mwarn)
+    final = [(e["kind"], e["value"], e["include"], e["start_ip"], e["end_ip"],
+              e["note"]) for e in others + merged]
+    return final, warnings
 
 
 # --- CLI (wired from scancat.main) -------------------------------------------
@@ -230,6 +323,10 @@ def _warn(sub, msg):
     print(f"[{sub}] error: {msg}", file=sys.stderr)
 
 
+def _notify(sub, msg):
+    print(f"[{sub}] warning: {msg}", file=sys.stderr)
+
+
 def _store_for(proj, sub):
     """Open (creating if needed) a subfolder's datastore."""
     store = SubfolderStore(proj.subfolder_path(sub) / "scancat.db")
@@ -278,16 +375,26 @@ def _target_subs(proj, args, existing, allow_all):
 
 def _scope_add(proj, sub, phase, values, include, note):
     store = _store_for(proj, sub)
+    new = []
     for raw in values:
         result, error = parse_target(raw)
         if not result:
             _warn(sub, error)
             continue
         kind, value, start_ip, end_ip = result
-        store.scope_set(phase, kind, value, include=include, note=note,
-                        start_ip=start_ip, end_ip=end_ip)
-        verb = "in scope" if include else "excluded"
-        print(f"[{sub}/{phase}] {verb}: {kind} {value}")
+        new.append(_entry(kind, value, include, start_ip, end_ip, note))
+    if not new:
+        return
+    # Normalize against what's already in the phase so a new entry that dups or
+    # overlaps an existing one is caught (existing first, so it wins on dedup).
+    existing = [_entry(r["kind"], r["value"], r["include"], r["start_ip"],
+                       r["end_ip"], r["note"]) for r in store.scope_active(phase)]
+    final, warnings = normalize_scope(existing + new)
+    for w in warnings:
+        _notify(sub, w)
+    added, removed = store.scope_reconcile(phase, final)
+    verb = "in scope" if include else "excluded"
+    print(f"[{sub}/{phase}] {verb}: +{added} -{removed}")
 
 
 def _scope_rm(proj, sub, phase, values):
@@ -311,14 +418,17 @@ def _scope_edit(proj, sub, phase):
             f.write(render_scope_text(sub, phase, store.scope_active(phase)))
         subprocess.call([os.environ.get("EDITOR", "nano"), tmp])
         with open(tmp) as f:
-            desired, invalid = parse_scope_text(f.read())
+            entries, invalid = parse_scope_text(f.read())
     finally:
         os.unlink(tmp)
     for lineno, error in invalid:
         _warn(sub, f"line {lineno}: {error}")
-    added, removed = store.scope_reconcile(phase, desired)
+    final, warnings = normalize_scope(entries)
+    for w in warnings:
+        _notify(sub, w)
+    added, removed = store.scope_reconcile(phase, final)
     msg = (f"[{sub}/{phase}] scope updated: +{added} -{removed}, "
-           f"{len(desired)} active")
+           f"{len(final)} active")
     if invalid:
         msg += f", {len(invalid)} invalid line(s) skipped"
     print(msg)
