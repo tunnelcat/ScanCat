@@ -1,7 +1,8 @@
-"""Interactive project setup: detect or create a project, pick scope, and
-make sure each in-scope subfolder has a domains.txt.
+"""Interactive project setup: detect or create a project, pick the subfolders
+in scope, and pick which recon modules to run.
 
-Uses questionary for arrow/spacebar checkbox menus.
+Uses questionary for arrow/spacebar checkbox menus. Per-subfolder target scope
+(domains/IPs/CIDRs) lives in the datastore and is managed via `scancat scope`.
 """
 from pathlib import Path
 
@@ -118,31 +119,3 @@ def select_modules(proj):
     proj.save()
     print(colored(f"[+] Modules: [{','.join(enabled)}]", "cyan"))
     return enabled
-
-
-def ensure_domains_files(proj, scope, editor_opener):
-    """Ensure each in-scope subfolder has a non-empty domains.txt.
-
-    Prompts to create and edit any that are missing. Returns the subfolders
-    that end up with domains to work on.
-    """
-    active = []
-    for sub in scope:
-        domains_file = proj.subfolder_path(sub) / "domains.txt"
-        has_content = domains_file.exists() and domains_file.read_text().strip()
-
-        if not has_content:
-            print(colored(f"[!] [{sub}] domains.txt is missing or empty.", "yellow"))
-            if questionary.confirm(
-                f"[{sub}] Create and edit domains.txt now?", default=True
-            ).ask():
-                domains_file.parent.mkdir(parents=True, exist_ok=True)
-                domains_file.touch(exist_ok=True)
-                editor_opener(str(domains_file))
-            has_content = domains_file.exists() and domains_file.read_text().strip()
-
-        if has_content:
-            active.append(sub)
-        else:
-            print(colored(f"[!] [{sub}] skipped (no domains).", "yellow"))
-    return active

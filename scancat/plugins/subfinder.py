@@ -9,8 +9,11 @@ class SubfinderModule(ReconModule):
     binary = "subfinder"
     out_datatypes = ["host"]
 
-    def build(self, domains_file, module_dir, domains):
-        argv = ["subfinder", "-silent", "-nc", "-all", "-dL", str(domains_file),
+    def build(self, module_dir, domains):
+        # Seed subfinder from the subfolder's in-scope domains.
+        list_file = module_dir / "subfinder-in.txt"
+        list_file.write_text("\n".join(domains) + ("\n" if domains else ""))
+        argv = ["subfinder", "-silent", "-nc", "-all", "-dL", str(list_file),
                 "-oJ", "-o", str(module_dir / "subfinder-out.json")]
         return [Command(argv)]
 

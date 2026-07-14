@@ -18,6 +18,7 @@ except ImportError:
 
 from rich.live import Live
 
+from .store import SubfolderStore
 from .ui import LiveDisplay
 from .plugins.subfinder import SubfinderModule
 from .plugins.theharvester import TheHarvesterModule
@@ -198,6 +199,14 @@ async def run_recon(proj, scope, enabled_modules=None):
                 refresh_per_second=12, transient=False, screen=True)
     locks = {sub: asyncio.Lock() for sub in scope}   # serializes each scancat.db
     term_attrs = _term_snapshot()
+
+    # Single-threaded safety net before any module reads scope: create each
+    # datastore and migrate off a legacy domains.txt if one is still around
+    # (normally already done by ensure_scope; a no-op once scope exists).
+    for sub in scope:
+        store = SubfolderStore(proj.subfolder_path(sub) / "scancat.db")
+        store.init()
+        store.migrate_domains_file(proj.subfolder_path(sub) / "domains.txt")
 
     active_modules = MODULES if enabled_modules is None else \
         [m for m in MODULES if m.name in enabled_modules]

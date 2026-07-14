@@ -1,9 +1,9 @@
 """dnsx DNS resolution.
 
 Runs after the subdomain modules for a subfolder finish (see depends_on),
-resolving the union of domains.txt and every domain already collected in the
-subfolder datastore. Its adapter records each host's resolvability (NOERROR)
-and its A/AAAA/CNAME records back into that same datastore.
+resolving the union of the in-scope domains and every domain already collected
+in the subfolder datastore. Its adapter records each host's resolvability
+(NOERROR) and its A/AAAA/CNAME records back into that same datastore.
 """
 import json
 
@@ -17,8 +17,8 @@ class DnsxModule(ReconModule):
     out_datatypes = ["dns"]
     depends_on = ["host"]   # wait for subfinder/theHarvester to settle
 
-    def build(self, domains_file, module_dir, domains):
-        # Input list = domains.txt + every host gathered so far in the
+    def build(self, module_dir, domains):
+        # Input list = in-scope domains + every host gathered so far in the
         # subfolder datastore (scancat.db one level up), deduped and sorted.
         list_file = module_dir / "dnsx-in.txt"
         entries = set(domains)

@@ -18,7 +18,7 @@ tool output into the common intermediate schema below, and `upsert()` writes it:
       "hosts":  [{"name": str, "resolvable": bool|None, "status_code": str|None}],
       "ips":    [{"address": str, "version": int|None}],
       "dns":    [{"host": str, "type": str, "value": str}],   # A/AAAA/CNAME/...
-      "emails": [{"address": str}],
+      "emails": [{"address": str, "host": str|None}],   # host = domain it came from
     }
 
 Any key may be omitted. A `dns` row's host is upserted as a host too, so the
@@ -67,6 +67,19 @@ CREATE TABLE IF NOT EXISTS observations (
     first_seen  TEXT NOT NULL,
     last_seen   TEXT NOT NULL,
     PRIMARY KEY (entity_type, entity_id, tool)
+);
+CREATE TABLE IF NOT EXISTS scope (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT NOT NULL,      -- 'domain'|'ip'|'cidr'|'range'
+    value      TEXT NOT NULL,      -- canonical form the modules consume
+    include    INTEGER NOT NULL DEFAULT 1,  -- 1 = in-scope, 0 = exclusion
+    enabled    INTEGER NOT NULL DEFAULT 1,  -- 0 = soft-deleted (kept for audit)
+    note       TEXT,
+    start_ip   INTEGER,            -- IPv4 numeric bounds for containment tests;
+    end_ip     INTEGER,            --   NULL for domains/asn and IPv6
+    added_at   TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(kind, value, include)
 );
 """
 
@@ -134,8 +147,13 @@ class SubfolderStore:
                 self._observe(conn, "dns_record", eid, tool, when)
                 n += 1
             for e in records.get("emails", []):
+                hid = None
+                if e.get("host"):
+                    hid = self._upsert(conn, "hosts", ["name"], [e["host"]],
+                                       {}, when)
+                    self._observe(conn, "host", hid, tool, when)
                 eid = self._upsert(conn, "emails", ["address"], [e["address"]],
-                                   {}, when)
+                                   {"host_id": hid}, when)
                 self._observe(conn, "email", eid, tool, when)
                 n += 1
         return n
@@ -172,3 +190,129 @@ class SubfolderStore:
                ON CONFLICT(entity_type, entity_id, tool)
                DO UPDATE SET last_seen=excluded.last_seen""",
             (entity_type, entity_id, tool, when, when))
+
+    # --- scope: user-authored, editable targets (see scancat.scope) ----------
+    # Unlike the discovered entities above, scope is authoritative input the
+    # user owns. Removing an entry soft-deletes it (enabled=0) so a pentest
+    # keeps an audit trail of what was in scope when; nothing is ever purged.
+
+    def scope_set(self, kind, value, include=True, note=None,
+                  start_ip=None, end_ip=None, when=None):
+        """Insert a scope entry, or re-enable/update it if it already exists.
+        Returns the row id."""
+        when = when or _now()
+        with self._connect() as conn:
+            row = conn.execute(
+                """INSERT INTO scope (kind, value, include, enabled, note,
+                        start_ip, end_ip, added_at, updated_at)
+                   VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+                   ON CONFLICT(kind, value, include) DO UPDATE SET
+                       enabled    = 1,
+                       note       = COALESCE(excluded.note, scope.note),
+                       updated_at = excluded.updated_at
+                   RETURNING id""",
+                (kind, value, 1 if include else 0, note,
+                 start_ip, end_ip, when, when)).fetchone()
+            return row[0]
+
+    def scope_disable(self, kind, value, include=None, when=None):
+        """Soft-delete matching scope entries (set enabled=0). With include
+        left None, disables both the in-scope and exclusion variants. Returns
+        the number of rows affected."""
+        when = when or _now()
+        sql = ("UPDATE scope SET enabled=0, updated_at=? "
+               "WHERE kind=? AND value=? AND enabled=1")
+        params = [when, kind, value]
+        if include is not None:
+            sql += " AND include=?"
+            params.append(1 if include else 0)
+        with self._connect() as conn:
+            return conn.execute(sql, params).rowcount
+
+    def scope_active(self):
+        """Enabled scope entries as dict rows (includes first, then kind/value)."""
+        if not self.path.exists():
+            return []
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM scope WHERE enabled=1 "
+                "ORDER BY include DESC, kind, value")]
+
+    def scope_domains(self):
+        """Active in-scope domain values, for subdomain/DNS seeding."""
+        if not self.path.exists():
+            return []
+        with self._connect() as conn:
+            return [r[0] for r in conn.execute(
+                "SELECT value FROM scope "
+                "WHERE kind='domain' AND include=1 AND enabled=1 "
+                "ORDER BY value")]
+
+    def scope_count(self):
+        if not self.path.exists():
+            return 0
+        with self._connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM scope").fetchone()[0]
+
+    def scope_reconcile(self, desired, when=None):
+        """Reconcile the active scope to `desired` (an iterable of
+        (kind, value, include, start_ip, end_ip, note)): each desired entry is
+        inserted or re-enabled with its note (the edit is authoritative for
+        notes), and active entries absent from `desired` are soft-deleted.
+        Returns (added, removed) counts."""
+        when = when or _now()
+        desired = list(desired)
+        want = {(k, v, 1 if inc else 0) for k, v, inc, *_ in desired}
+        have = {(r["kind"], r["value"], r["include"]) for r in self.scope_active()}
+        add, remove = want - have, have - want
+        with self._connect() as conn:
+            for k, v, inc, start_ip, end_ip, note in desired:
+                conn.execute(
+                    """INSERT INTO scope (kind, value, include, enabled, note,
+                            start_ip, end_ip, added_at, updated_at)
+                       VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+                       ON CONFLICT(kind, value, include) DO UPDATE SET
+                           enabled=1, note=excluded.note,
+                           updated_at=excluded.updated_at""",
+                    (k, v, 1 if inc else 0, note, start_ip, end_ip, when, when))
+            for k, v, inc in remove:
+                conn.execute(
+                    "UPDATE scope SET enabled=0, updated_at=? "
+                    "WHERE kind=? AND value=? AND include=?",
+                    (when, k, v, inc))
+        return (len(add), len(remove))
+
+    def migrate_domains_file(self, path, when=None):
+        """One-time migration off the legacy domains.txt: if scope is empty,
+        import each line into scope (auto-classified). A fully-valid file is
+        deleted afterwards so scope is the only source of truth; a file with
+        invalid lines is kept in place for the user to fix. Returns
+        (imported, invalid) where invalid is a list of (line, error). Both are
+        empty when the file is absent or scope already had entries."""
+        path = Path(path)
+        if not path.exists() or self.scope_count() > 0:
+            return 0, []
+        from .scope import parse_target   # local import: avoids an import cycle
+        when = when or _now()
+        imported, invalid = 0, []
+        with self._connect() as conn:
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                result, error = parse_target(line)
+                if not result:
+                    invalid.append((line, error))
+                    continue
+                kind, value, start_ip, end_ip = result
+                conn.execute(
+                    """INSERT INTO scope (kind, value, include, enabled,
+                            start_ip, end_ip, added_at, updated_at)
+                       VALUES (?, ?, 1, 1, ?, ?, ?, ?)
+                       ON CONFLICT(kind, value, include) DO NOTHING""",
+                    (kind, value, start_ip, end_ip, when, when))
+                imported += 1
+        if not invalid:
+            path.unlink()   # fully migrated; retire the legacy file
+        return imported, invalid

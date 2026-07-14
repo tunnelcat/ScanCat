@@ -11,7 +11,7 @@ class TheHarvesterModule(ReconModule):
     binary = "theHarvester"
     out_datatypes = ["host"]
 
-    def build(self, domains_file, module_dir, domains):
+    def build(self, module_dir, domains):
         commands = []
         for domain in domains:
             filename = f"theHarvester-{domain.replace('.', '-')}"
@@ -36,6 +36,13 @@ class TheHarvesterModule(ReconModule):
                 data = json.loads(out_file.read_text())
             except (json.JSONDecodeError, OSError):
                 continue
+            # The queried domain (theHarvester records its args in "cmd", e.g.
+            # "-q -d example.com -b all ...") is the domain that produced these
+            # emails, so map them to it.
+            parts = (data.get("cmd") or "").split()
+            queried = (normalize_host(parts[parts.index("-d") + 1])
+                       if "-d" in parts and parts.index("-d") + 1 < len(parts)
+                       else None)
             for entry in data.get("hosts", []):
                 # entries may be "host", "host:ip", or "host:ipv6"
                 host_part, _, ip_part = entry.partition(":")
@@ -54,6 +61,6 @@ class TheHarvesterModule(ReconModule):
             for em in data.get("emails", []):
                 em = em.strip().lower()
                 if em and "@" in em:
-                    emails.append({"address": em})
+                    emails.append({"address": em, "host": queried})
 
         return {"hosts": hosts, "ips": ips, "dns": dns, "emails": emails}

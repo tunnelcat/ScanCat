@@ -10,7 +10,6 @@ import re
 import shutil
 import signal
 from datetime import datetime
-from pathlib import Path
 
 from ..store import SubfolderStore
 
@@ -20,12 +19,6 @@ from ..store import SubfolderStore
 FQDN_RE = re.compile(
     r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$"
 )
-
-
-def read_domains(domains_file):
-    """Domains from a domains.txt (strips blanks and # comments)."""
-    lines = Path(domains_file).read_text().splitlines()
-    return [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
 
 
 def normalize_host(host):
@@ -78,8 +71,10 @@ class ReconModule:
     depends_on = []          # out_datatype tags that must finish (same
                              # subfolder) before this runs; [] = start now
 
-    def build(self, domains_file, module_dir, domains):
-        """Return the list of Command objects to run. Override in subclasses."""
+    def build(self, module_dir, domains):
+        """Return the list of Command objects to run. `domains` is the
+        subfolder's in-scope domains (from the datastore). Override in
+        subclasses."""
         raise NotImplementedError
 
     def adapt(self, module_dir):
@@ -98,15 +93,16 @@ class ReconModule:
         subfolder_dir = proj.subfolder_path(sub)
         module_dir = subfolder_dir / self.name
         module_dir.mkdir(parents=True, exist_ok=True)
-        domains_file = subfolder_dir / "domains.txt"
-        domains = read_domains(domains_file)
+        # Scope in scancat.db is the sole source of truth for targets.
+        store = SubfolderStore(subfolder_dir / "scancat.db")
+        domains = store.scope_domains()
 
         mlog = ModuleLog(module_dir / f"{self.name}.log")
         mlog.write(f"=== {self.name} started ===")
 
         display.start(key)
         try:
-            for cmd in self.build(domains_file, module_dir, domains):
+            for cmd in self.build(module_dir, domains):
                 tee = open(cmd.tee, "w") if cmd.tee else None
                 mlog.write(f"$ {' '.join(cmd.argv)}")
                 try:
@@ -170,7 +166,6 @@ class ReconModule:
             records = self.adapt(module_dir)
             if records:
                 async with lock:
-                    store = SubfolderStore(subfolder_dir / "scancat.db")
                     store.init()
                     count = store.upsert(records, tool=self.name)
                 display.log(key, f"upserted {count} records")
