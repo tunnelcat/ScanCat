@@ -39,6 +39,38 @@ def ip_version(addr):
         return None
 
 
+# Unique key per intermediate list, matching the datastore's UNIQUE constraints.
+# Used to collapse an adapter's duplicate rows before they reach the DB - e.g.
+# subfinder's -oJ -all output repeats each host once per source that found it.
+_RECORD_KEYS = {
+    "hosts":  lambda r: r["name"],
+    "ips":    lambda r: r["address"],
+    "dns":    lambda r: (r["host"], r["type"], r["value"]),
+    "emails": lambda r: r["address"],
+}
+
+
+def dedup_records(records):
+    """Return `records` with duplicate rows dropped from each list (first
+    occurrence wins, by the list's natural unique key). Relying on the DB's
+    ON CONFLICT would still store one row, but it wastes an upsert per duplicate
+    and inflates the reported count; dedup here avoids both."""
+    out = {}
+    for name, rows in records.items():
+        key = _RECORD_KEYS.get(name)
+        if key is None:
+            out[name] = rows
+            continue
+        seen, deduped = set(), []
+        for row in rows:
+            k = key(row)
+            if k not in seen:
+                seen.add(k)
+                deduped.append(row)
+        out[name] = deduped
+    return out
+
+
 class Command:
     """One external command to run.
 
@@ -165,6 +197,7 @@ class ReconModule:
             # datastore. The lock serializes writes to the shared scancat.db.
             records = self.adapt(module_dir)
             if records:
+                records = dedup_records(records)
                 async with lock:
                     store.init()
                     count = store.upsert(records, tool=self.name)
