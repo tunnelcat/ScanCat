@@ -22,7 +22,9 @@ tool output into the common intermediate schema below, and `upsert()` writes it:
     }
 
 Any key may be omitted. A `dns` row's host is upserted as a host too, so the
-hosts table always covers every name referenced by a record.
+hosts table always covers every name referenced by a record. A/AAAA `dns` rows
+are stored as `resolutions` (host -> ip): the value is upserted into `ips` and
+linked, rather than duplicated as text; other record types go to `dns_records`.
 """
 import sqlite3
 from datetime import datetime, timezone
@@ -47,11 +49,19 @@ CREATE TABLE IF NOT EXISTS ips (
 CREATE TABLE IF NOT EXISTS dns_records (
     id          INTEGER PRIMARY KEY,
     host_id     INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
-    record_type TEXT NOT NULL,    -- A, AAAA, CNAME, MX, NS, TXT, ...
-    value       TEXT NOT NULL,    -- IP, target host, or text
+    record_type TEXT NOT NULL,    -- CNAME, MX, NS, TXT, SOA, ... (never A/AAAA)
+    value       TEXT NOT NULL,    -- target host or text
     first_seen  TEXT NOT NULL,
     last_seen   TEXT NOT NULL,
     UNIQUE(host_id, record_type, value)
+);
+CREATE TABLE IF NOT EXISTS resolutions (
+    id         INTEGER PRIMARY KEY,
+    host_id    INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    ip_id      INTEGER NOT NULL REFERENCES ips(id)   ON DELETE CASCADE,
+    first_seen TEXT NOT NULL,     -- an A/AAAA answer: host resolves to ip
+    last_seen  TEXT NOT NULL,     --   (A vs AAAA is implied by ips.version)
+    UNIQUE(host_id, ip_id)
 );
 CREATE TABLE IF NOT EXISTS emails (
     id         INTEGER PRIMARY KEY,
@@ -61,7 +71,7 @@ CREATE TABLE IF NOT EXISTS emails (
     last_seen  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS observations (
-    entity_type TEXT NOT NULL,    -- 'host' | 'ip' | 'dns_record' | 'email'
+    entity_type TEXT NOT NULL,    -- 'host'|'ip'|'dns_record'|'resolution'|'email'
     entity_id   INTEGER NOT NULL,
     tool        TEXT NOT NULL,
     first_seen  TEXT NOT NULL,
@@ -109,32 +119,10 @@ class SubfolderStore:
         return conn
 
     def init(self):
-        """Create the schema if it doesn't exist. Idempotent. Also upgrades a
-        pre-phase scope table (tagging its rows 'recon')."""
+        """Create the schema if it doesn't exist. Idempotent. No migrations:
+        during development just delete the scancat.db to pick up schema changes."""
         with self._connect() as conn:
-            self._rename_legacy_scope(conn)   # pre-phase scope -> scope_legacy
-            conn.executescript(SCHEMA)         # (re)create scope + other tables
-            self._absorb_legacy_scope(conn)    # copy legacy rows in, drop it
-
-    @staticmethod
-    def _rename_legacy_scope(conn):
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(scope)")]
-        legacy = [r[1] for r in conn.execute("PRAGMA table_info(scope_legacy)")]
-        if cols and "phase" not in cols and not legacy:
-            conn.execute("ALTER TABLE scope RENAME TO scope_legacy")
-
-    @staticmethod
-    def _absorb_legacy_scope(conn):
-        if not [r[1] for r in conn.execute("PRAGMA table_info(scope_legacy)")]:
-            return
-        conn.executescript("""
-            INSERT OR IGNORE INTO scope
-                (id, phase, kind, value, include, enabled, note,
-                 start_ip, end_ip, added_at, updated_at)
-            SELECT id, 'recon', kind, value, include, enabled, note,
-                   start_ip, end_ip, added_at, updated_at FROM scope_legacy;
-            DROP TABLE scope_legacy;
-        """)
+            conn.executescript(SCHEMA)
 
     def host_names(self):
         """All known host names, sorted. Empty if the db doesn't exist yet."""
@@ -165,10 +153,21 @@ class SubfolderStore:
             for r in records.get("dns", []):
                 hid = self._upsert(conn, "hosts", ["name"], [r["host"]], {}, when)
                 self._observe(conn, "host", hid, tool, when)
-                eid = self._upsert(conn, "dns_records",
-                                   ["host_id", "record_type", "value"],
-                                   [hid, r["type"], r["value"]], {}, when)
-                self._observe(conn, "dns_record", eid, tool, when)
+                if r["type"] in ("A", "AAAA"):
+                    # An address answer: upsert the ip and link host -> ip,
+                    # instead of duplicating the ip string in dns_records.
+                    ver = 4 if r["type"] == "A" else 6
+                    ipid = self._upsert(conn, "ips", ["address"], [r["value"]],
+                                        {"version": ver}, when)
+                    self._observe(conn, "ip", ipid, tool, when)
+                    rid = self._upsert(conn, "resolutions",
+                                       ["host_id", "ip_id"], [hid, ipid], {}, when)
+                    self._observe(conn, "resolution", rid, tool, when)
+                else:
+                    eid = self._upsert(conn, "dns_records",
+                                       ["host_id", "record_type", "value"],
+                                       [hid, r["type"], r["value"]], {}, when)
+                    self._observe(conn, "dns_record", eid, tool, when)
                 n += 1
             for e in records.get("emails", []):
                 hid = None
@@ -253,15 +252,20 @@ class SubfolderStore:
         with self._connect() as conn:
             return conn.execute(sql, params).rowcount
 
-    def scope_active(self, phase):
-        """Enabled scope entries in `phase` as dict rows (includes first)."""
+    def scope_active(self, phase=None):
+        """Enabled scope entries as dict rows (grouped by phase, includes
+        first). Pass a phase to filter; omit it for every phase."""
         if not self.path.exists():
             return []
+        sql = "SELECT * FROM scope WHERE enabled=1"
+        params = []
+        if phase is not None:
+            sql += " AND phase=?"
+            params.append(phase)
+        sql += " ORDER BY phase, include DESC, kind, value"
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            return [dict(r) for r in conn.execute(
-                "SELECT * FROM scope WHERE phase=? AND enabled=1 "
-                "ORDER BY include DESC, kind, value", (phase,))]
+            return [dict(r) for r in conn.execute(sql, params)]
 
     def scope_domains(self, phase):
         """Active in-scope domain values in `phase`, for subdomain/DNS seeding."""

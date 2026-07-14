@@ -37,8 +37,9 @@ class DnsxModule(ReconModule):
             return {}
 
         # Deduplication is the datastore's job (unique keys + upsert), so this
-        # just emits every valid record it sees.
-        hosts, dns, ips = [], [], []
+        # just emits every valid record it sees. A/AAAA go out as dns rows; the
+        # store turns them into ips + resolutions, so no separate ips list.
+        hosts, dns = [], []
         for line in out_file.read_text().splitlines():
             line = line.strip()
             if not line:
@@ -57,7 +58,6 @@ class DnsxModule(ReconModule):
                 for ip in (data.get(rtype) or []):
                     ip = ip.strip()
                     if ip and ip_version(ip) == want:
-                        ips.append({"address": ip, "version": want})
                         dns.append({"host": host, "type": rtype.upper(),
                                     "value": ip})
             for cname in (data.get("cname") or []):
@@ -65,4 +65,4 @@ class DnsxModule(ReconModule):
                 if target:
                     dns.append({"host": host, "type": "CNAME", "value": target})
 
-        return {"hosts": hosts, "dns": dns, "ips": ips}
+        return {"hosts": hosts, "dns": dns}

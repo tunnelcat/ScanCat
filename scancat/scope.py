@@ -20,6 +20,7 @@ Entry paths, all keeping the DB authoritative:
   * `scancat scope import --from P --to Q` - copies scope entries between phases.
 """
 import fnmatch
+import itertools
 import ipaddress
 import os
 import re
@@ -285,8 +286,9 @@ def cmd_scope(args, proj):
     action = args.scope_cmd
 
     if action == "expand":
-        # expand only ever targets the scan phase, from recon discoveries.
-        for sub in _target_subs(proj, args, existing, allow_all=False):
+        # expand only ever targets the scan phase, from recon discoveries;
+        # defaults to all subfolders, -s narrows it.
+        for sub in _target_subs(proj, args, existing, allow_all=True):
             _scope_expand(proj, sub,
                           include_unresolvable=args.include_unresolvable_hosts,
                           include_noise=args.include_scan_noise)
@@ -491,13 +493,16 @@ def _scope_import(proj, sub, from_phase, to_phase):
     print(f"[{sub}/{to_phase}] import from {from_phase}: " + ", ".join(parts))
 
 
-def _print_scope(sub, store, phase):
+def _print_scope(sub, store, phase=None):
+    """Print a subfolder's scope, grouped by phase. With phase given, only that
+    phase; otherwise every phase that has entries."""
     rows = store.scope_active(phase)
     if not rows:
-        print(f"[{sub}/{phase}] (no scope)")
+        print(f"[{sub}/{phase}] (no scope)" if phase else f"[{sub}] (no scope)")
         return
-    print(f"[{sub}/{phase}]")
-    for r in rows:
-        mark = " " if r["include"] else "!"
-        note = f"    # {r['note']}" if r["note"] else ""
-        print(f"  {mark} {r['kind']:6} {r['value']}{note}")
+    for ph, group in itertools.groupby(rows, key=lambda r: r["phase"]):
+        print(f"[{sub}/{ph}]")
+        for r in group:
+            mark = " " if r["include"] else "!"
+            note = f"    # {r['note']}" if r["note"] else ""
+            print(f"  {mark} {r['kind']:6} {r['value']}{note}")

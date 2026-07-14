@@ -97,9 +97,10 @@ def main():
             p.add_argument("--note", help="optional note stored with the entry")
 
     p = scope_sub.add_parser("list", help="Show current scope",
-                             description="Show the active scope for a phase, for "
-                                         "one subfolder or all of them.")
-    add_phase(p)
+                             description="Show the active scope, grouped by "
+                                         "phase, for one subfolder or all.")
+    p.add_argument("-p", "--phase", choices=("recon", "scan"),
+                   help="filter to one phase (default: all phases)")
     add_sub(p, "subfolder(s) (default: all)")
 
     p = scope_sub.add_parser(

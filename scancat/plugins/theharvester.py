@@ -51,13 +51,14 @@ class TheHarvesterModule(ReconModule):
                     continue
                 hosts.append({"name": host})
                 ip = ip_part.strip()
-                if ip:
-                    ver = add_ip(ip)
-                    if ver:
-                        rtype = "A" if ver == 4 else "AAAA"
-                        dns.append({"host": host, "type": rtype, "value": ip})
+                ver = ip_version(ip) if ip else None
+                if ver:
+                    # Host-linked ip: the store's A/AAAA handling upserts it into
+                    # ips + resolutions, so no separate ips entry is needed here.
+                    dns.append({"host": host, "type": "A" if ver == 4 else "AAAA",
+                                "value": ip})
             for addr in data.get("ips", []):
-                add_ip(addr.strip())
+                add_ip(addr.strip())   # standalone ips (no host) still need this
             for em in data.get("emails", []):
                 em = em.strip().lower()
                 if em and "@" in em:
