@@ -207,21 +207,9 @@ def _warn(sub, msg):
 
 
 def _store_for(proj, sub):
-    """Open a subfolder's datastore, migrating a legacy domains.txt into scope
-    the first time we touch the subfolder. Fully-valid files are removed once
-    imported; a file with invalid lines is kept so the user can fix them."""
+    """Open (creating if needed) a subfolder's datastore."""
     store = SubfolderStore(proj.subfolder_path(sub) / "scancat.db")
     store.init()
-    imported, invalid = store.migrate_domains_file(
-        proj.subfolder_path(sub) / "domains.txt")
-    if imported:
-        print(f"[{sub}] migrated {imported} target(s) from domains.txt into scope")
-    for line, error in invalid:
-        _warn(sub, f"domains.txt: skipped {error}")
-    if invalid:
-        _warn(sub, f"kept domains.txt ({len(invalid)} invalid line(s) to fix)")
-    elif imported:
-        print(f"[{sub}] domains.txt removed (migrated to scope)")
     return store
 
 
@@ -240,7 +228,8 @@ def ensure_scope(proj, subfolders):
         if store.scope_domains():
             active.append(sub)
         else:
-            print(f"[!] [{sub}] skipped (no scope).")
+            print(f"[!] [{sub}] skipped - set targets with "
+                  f"'scancat scope add <target> --sub {sub}'")
     return active
 
 

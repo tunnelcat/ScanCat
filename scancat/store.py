@@ -249,12 +249,6 @@ class SubfolderStore:
                 "WHERE kind='domain' AND include=1 AND enabled=1 "
                 "ORDER BY value")]
 
-    def scope_count(self):
-        if not self.path.exists():
-            return 0
-        with self._connect() as conn:
-            return conn.execute("SELECT COUNT(*) FROM scope").fetchone()[0]
-
     def scope_reconcile(self, desired, when=None):
         """Reconcile the active scope to `desired` (an iterable of
         (kind, value, include, start_ip, end_ip, note)): each desired entry is
@@ -282,37 +276,3 @@ class SubfolderStore:
                     "WHERE kind=? AND value=? AND include=?",
                     (when, k, v, inc))
         return (len(add), len(remove))
-
-    def migrate_domains_file(self, path, when=None):
-        """One-time migration off the legacy domains.txt: if scope is empty,
-        import each line into scope (auto-classified). A fully-valid file is
-        deleted afterwards so scope is the only source of truth; a file with
-        invalid lines is kept in place for the user to fix. Returns
-        (imported, invalid) where invalid is a list of (line, error). Both are
-        empty when the file is absent or scope already had entries."""
-        path = Path(path)
-        if not path.exists() or self.scope_count() > 0:
-            return 0, []
-        from .scope import parse_target   # local import: avoids an import cycle
-        when = when or _now()
-        imported, invalid = 0, []
-        with self._connect() as conn:
-            for line in path.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                result, error = parse_target(line)
-                if not result:
-                    invalid.append((line, error))
-                    continue
-                kind, value, start_ip, end_ip = result
-                conn.execute(
-                    """INSERT INTO scope (kind, value, include, enabled,
-                            start_ip, end_ip, added_at, updated_at)
-                       VALUES (?, ?, 1, 1, ?, ?, ?, ?)
-                       ON CONFLICT(kind, value, include) DO NOTHING""",
-                    (kind, value, start_ip, end_ip, when, when))
-                imported += 1
-        if not invalid:
-            path.unlink()   # fully migrated; retire the legacy file
-        return imported, invalid
