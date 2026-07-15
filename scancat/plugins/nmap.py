@@ -40,6 +40,8 @@ _RE_PORTLINE = re.compile(
     r"^(\d+)/(tcp|udp|sctp)\s+(\S+)\s+(\S+)(?:\s+(.*\S))?\s*$")
 _RE_REPORT = re.compile(r"Nmap scan report for (.+)")
 _RE_HOST_UP = re.compile(r"Host is up(?:, received (\S+))?")
+# --resolve-all emits one of these per multi-homed hostname; pure noise.
+_RE_RESOLVE_WARN = re.compile(r"Hostname .* resolves to \d+ IPs")
 # Failures/warnings we never want to hide behind the filter.
 _RE_NOTABLE = re.compile(r"QUITTING|Warning|Failed|denied|password|error",
                          re.IGNORECASE)
@@ -173,6 +175,7 @@ class NmapBase(ReconModule):
     output_dir = "nmap"      # every mode writes into the shared nmap/ folder
     flags = []               # per-mode nmap flags
     use_global = True        # prepend GLOBAL_FLAGS (custom mode sets its own)
+    show_host_up = False     # only the ping mode reports host-up in the TUI
 
     def nmap_flags(self):
         return (GLOBAL_FLAGS if self.use_global else []) + list(self.flags)
@@ -226,9 +229,13 @@ class NmapBase(ReconModule):
             return None
         m = _RE_HOST_UP.search(line)
         if m:
+            if not self.show_host_up:
+                return None
             host = getattr(self, "_last_host", "?")
             reason = m.group(1)
             return f"[+] {host} is up" + (f" ({reason})" if reason else "")
+        if _RE_RESOLVE_WARN.search(line):
+            return None
         if _RE_NOTABLE.search(line):
             return line
         return None
@@ -308,6 +315,7 @@ class NmapBase(ReconModule):
 class NmapPingModule(NmapBase):
     name = "nmap-ping"
     flags = ["-sn"]
+    show_host_up = True
 
 
 class NmapFastModule(NmapBase):
