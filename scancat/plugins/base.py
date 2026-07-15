@@ -143,7 +143,7 @@ class ReconModule:
     async def run(self, key, display, proj, sub, lock):
         if self.binary and shutil.which(self.binary) is None:
             display.missing(key)
-            display.log(key, f"[!] '{self.binary}' not found on PATH")
+            display.log(key, f"[-] '{self.binary}' not found on PATH")
             return
 
         self.proj = proj
@@ -177,8 +177,8 @@ class ReconModule:
                     )
                 except FileNotFoundError:
                     display.missing(key)
-                    display.log(key, f"[!] failed to launch {cmd.argv[0]}")
-                    mlog.write(f"[!] failed to launch {cmd.argv[0]}")
+                    display.log(key, f"[-] failed to launch {cmd.argv[0]}")
+                    mlog.write(f"[-] failed to launch {cmd.argv[0]}")
                     if tee:
                         tee.close()
                     return
@@ -195,8 +195,8 @@ class ReconModule:
                             tee.write(line + "\n")
                     await proc.wait()
                     if proc.returncode:
-                        mlog.write(f"[!] exited with code {proc.returncode}")
-                        display.log(key, f"[!] exited with code {proc.returncode}")
+                        mlog.write(f"[-] exited with code {proc.returncode}")
+                        display.log(key, f"[-] exited with code {proc.returncode}")
                 except asyncio.CancelledError:
                     # Resume first, in case the module was paused (SIGSTOP):
                     # a stopped process can't act on SIGTERM until continued.

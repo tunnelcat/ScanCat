@@ -42,9 +42,10 @@ _RE_REPORT = re.compile(r"Nmap scan report for (.+)")
 _RE_HOST_UP = re.compile(r"Host is up(?:, received (\S+))?")
 # --resolve-all emits one of these per multi-homed hostname; pure noise.
 _RE_RESOLVE_WARN = re.compile(r"Hostname .* resolves to \d+ IPs")
-# Failures/warnings we never want to hide behind the filter.
-_RE_NOTABLE = re.compile(r"QUITTING|Warning|Failed|denied|password|error",
-                         re.IGNORECASE)
+# Failures/warnings we never want to hide behind the filter; tagged so the TUI
+# colours them (see ui.NOTIFY): warnings yellow, errors red.
+_RE_WARN = re.compile(r"Warning", re.IGNORECASE)
+_RE_ERROR = re.compile(r"QUITTING|Failed|denied|password|error", re.IGNORECASE)
 
 # nmap options that require raw sockets (root). Used to decide when to sudo.
 ROOT_FLAGS = {
@@ -219,7 +220,9 @@ class NmapBase(ReconModule):
             return f"[+] {host}  open  {proto}/{port}"
         m = _RE_PORTLINE.match(line)
         if m:
-            port, proto, _state, service, version = m.groups()
+            port, proto, state, service, version = m.groups()
+            if "filtered" in state:          # skip open|filtered (UDP no-reply)
+                return None
             host = getattr(self, "_last_host", "?")
             extra = f"  {version}" if version else ""
             return f"[+] {host}  {proto}/{port}  {service}{extra}"
@@ -236,8 +239,10 @@ class NmapBase(ReconModule):
             return f"[+] {host} is up" + (f" ({reason})" if reason else "")
         if _RE_RESOLVE_WARN.search(line):
             return None
-        if _RE_NOTABLE.search(line):
-            return line
+        if _RE_ERROR.search(line):
+            return f"[-] {line}"
+        if _RE_WARN.search(line):
+            return f"[!] {line}"
         return None
 
     def adapt(self, module_dir):

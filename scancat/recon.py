@@ -189,7 +189,9 @@ def _install_key_reader(loop, display, handlers):
 
 
 async def run_modules(proj, scope, modules, enabled_modules=None):
-    display = LiveDisplay(",".join(scope))
+    # Modules in a run share a phase (recon/scan/vuln); label the TUI with it.
+    phase = modules[0].module_class if modules else "recon"
+    display = LiveDisplay(",".join(scope), phase=phase)
     # Rich owns the single refresh timer (auto_refresh); the display object
     # is itself the renderable, so there's no second timer to race -> no
     # flicker, and the frame paints immediately instead of only on exit.

@@ -21,10 +21,16 @@ from rich.text import Text
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+# scancat's notification convention, shared by the TUI and console output:
+# a leading token tags each line's severity, and the TUI colours the token.
+#   [+] finding/success  [*] info  [!] warning  [-] error
+NOTIFY = {"[+]": "green", "[*]": "cyan", "[!]": "yellow", "[-]": "red"}
+
 
 class LiveDisplay:
-    def __init__(self, scope_label):
+    def __init__(self, scope_label, phase="recon"):
         self.scope_label = scope_label
+        self.phase = phase       # "recon" | "scan" | "vuln"; shown in the header
         self.console = Console()
         self.tasks = {}          # key -> state dict
         self.order = []          # keys in insertion order
@@ -326,7 +332,12 @@ class LiveDisplay:
                 t = Text()
                 t.append(f"[{sub}]", style="cyan")
                 t.append(f"[{module}] ", style="magenta")
-                t.append(line)
+                color = NOTIFY.get(line[:3])
+                if color:
+                    t.append(line[:3], style=f"bold {color}")
+                    t.append(line[3:])
+                else:
+                    t.append(line)
                 rows.append(t)
         return Text("\n").join(rows)
 
@@ -423,7 +434,7 @@ class LiveDisplay:
         return hint
 
     def _render(self):
-        header = Text(f"scancat recon  scope [{self.scope_label}]", style="bold")
+        header = Text(f"scancat {self.phase}  scope [{self.scope_label}]", style="bold")
         hint = self._hint()
 
         # header(1) + table header(1) + table rule(1) + hint(1) + 1 safety
@@ -484,7 +495,7 @@ class LiveDisplay:
                 line.append(f"  ({self._runtime(t)})", style="grey50")
             rows.append(line)
 
-        header = Text(f"recon summary  scope [{self.scope_label}]", style="bold")
+        header = Text(f"{self.phase} summary  scope [{self.scope_label}]", style="bold")
         tally = Text("  ".join(f"{n} {label}" for label, n in counts.items()),
                     style="grey50")
         return Group(header, *rows, tally)

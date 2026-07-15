@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import sys
 
+from termcolor import colored
+
 from .banner import display_banner
 from .folderselect import (ensure_project, select_scope, select_modules,
                           select_scan_modules)
@@ -19,15 +21,18 @@ def _prime_sudo():
     modes can run as `sudo -n nmap` without a password prompt appearing (and
     hanging) inside the alternate-screen display. Returns True if usable."""
     if shutil.which("sudo") is None:
-        print("[!] sudo not found; run scancat as root for raw scans.")
+        print(colored("[-] sudo not found; run scancat as root for raw scans.",
+                      "red"))
         return False
-    print("[*] Some selected scan modes need root; caching sudo credentials...")
+    print(colored("[*] Some selected scan modes need root; caching sudo "
+                  "credentials...", "cyan"))
     try:
         ok = subprocess.call(["sudo", "-v"]) == 0
     except OSError:
         ok = False
     if not ok:
-        print("[!] sudo authentication failed; raw scan modes may not work.")
+        print(colored("[!] sudo authentication failed; raw scan modes may not "
+                      "work.", "yellow"))
     return ok
 
 
