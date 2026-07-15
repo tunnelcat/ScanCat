@@ -65,8 +65,15 @@ def scan_mode(args, proj):
     if not active:
         print("No subfolders have targets in the scan scope. Nothing to run.")
         return
-    proj.use_sudo = (scan_needs_root(enabled_modules, proj)
-                     and os.geteuid() != 0 and _prime_sudo())
+    proj.use_sudo = False
+    if scan_needs_root(enabled_modules, proj) and os.geteuid() != 0:
+        # Prime sudo up front; if it fails, abort here rather than opening the
+        # TUI only for every root scan mode to fail on `sudo -n`.
+        if not _prime_sudo():
+            print(colored("[-] Root scan modes need sudo; aborting before the "
+                          "scan starts.", "red"))
+            return
+        proj.use_sudo = True
     asyncio.run(run_modules(proj, active, SCAN_MODULES, enabled_modules))
 
 

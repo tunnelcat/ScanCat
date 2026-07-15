@@ -137,8 +137,8 @@ class ReconModule:
         async with lock:
             store.init()
             count = store.upsert(records, tool=self.name)
-        display.log(key, f"upserted {count} records")
-        mlog.write(f"upserted {count} records")
+        display.log(key, f"[*] upserted {count} records")
+        mlog.write(f"[*] upserted {count} records")
 
     async def run(self, key, display, proj, sub, lock):
         if self.binary and shutil.which(self.binary) is None:
