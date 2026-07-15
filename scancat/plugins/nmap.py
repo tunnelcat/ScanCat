@@ -21,6 +21,7 @@ store upserts like any other module output.
 """
 import ipaddress
 import json
+import re
 import shlex
 import xml.etree.ElementTree as ET
 
@@ -29,6 +30,14 @@ from ..store import SubfolderStore
 
 # Applied to every preset mode; the custom mode overrides them with its own.
 GLOBAL_FLAGS = ["-vv", "--resolve-all", "--unique"]
+
+# Lines worth surfacing live from nmap's -vv firehose (see NmapBase.display_line).
+_RE_PORT = re.compile(r"Discovered open port (\d+)/(\w+) on (\S+)")
+_RE_REPORT = re.compile(r"Nmap scan report for (.+)")
+_RE_HOST_UP = re.compile(r"Host is up(?:, received (\S+))?")
+# Failures/warnings we never want to hide behind the filter.
+_RE_NOTABLE = re.compile(r"QUITTING|Warning|Failed|denied|password|error",
+                         re.IGNORECASE)
 
 # nmap options that require raw sockets (root). Used to decide when to sudo.
 ROOT_FLAGS = {
@@ -39,6 +48,28 @@ ROOT_FLAGS = {
 
 def _needs_root(flags):
     return any(f in ROOT_FLAGS for f in flags)
+
+
+def _parse_nmap_xml(path):
+    """Parse an nmap XML file into its root element, tolerating the truncated
+    file an interrupted scan leaves behind. nmap appends each host's
+    <host>...</host> block whole as the host finishes but only writes the
+    closing </nmaprun> when it completes; so on a parse error we salvage every
+    host up to the last </host> and close the document ourselves. Returns None
+    if the file is missing or too short to yield even one complete host."""
+    if not path.exists():
+        return None
+    text = path.read_text(errors="replace")
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError:
+        end = text.rfind("</host>")
+        if end == -1:
+            return None
+        try:
+            return ET.fromstring(text[:end + len("</host>")] + "</nmaprun>")
+        except ET.ParseError:
+            return None
 
 
 def _int(s):
@@ -170,14 +201,32 @@ class NmapBase(ReconModule):
         argv += ["-oA", str(module_dir / self.name)]
         return [Command(argv)]
 
+    def display_line(self, line):
+        """Filter nmap's -vv output down to the events worth showing live -
+        open-port discoveries and host-up results - so the TUI isn't a wall of
+        scan noise. The full output still lands in <mode>.log regardless."""
+        m = _RE_PORT.search(line)
+        if m:
+            port, proto, host = m.groups()
+            return f"[+] {host}  open  {proto}/{port}"
+        m = _RE_REPORT.search(line)
+        if m:
+            self._last_host = m.group(1).strip()
+            return None
+        m = _RE_HOST_UP.search(line)
+        if m:
+            host = getattr(self, "_last_host", "?")
+            reason = m.group(1)
+            return f"[+] {host} is up" + (f" ({reason})" if reason else "")
+        if _RE_NOTABLE.search(line):
+            return line
+        return None
+
     def adapt(self, module_dir):
-        # Parse only this mode's own XML (the nmap/ dir holds every mode's).
-        xml_path = module_dir / f"{self.name}.xml"
-        if not xml_path.exists():
-            return {}
-        try:
-            root = ET.parse(xml_path).getroot()
-        except ET.ParseError:
+        # Parse only this mode's own XML (the nmap/ dir holds every mode's),
+        # salvaging partial output if the scan was interrupted.
+        root = _parse_nmap_xml(module_dir / f"{self.name}.xml")
+        if root is None:
             return {}
 
         hosts, ips, dns, ports, scripts = [], [], [], [], []
@@ -257,18 +306,19 @@ class NmapFastModule(NmapBase):
 
 class NmapTcp1000Module(NmapBase):
     name = "nmap-tcp-1000"
-    flags = ["-sS", "--top-ports", "1000", "--open", "-Pn", "-T4"]
+    flags = ["-sS", "--top-ports", "1000", "--open", "-sV", "-sC", "-Pn", "-T4"]
 
 
 class NmapTcpAllModule(NmapBase):
     name = "nmap-tcp-all"
-    flags = ["-sS", "-p-", "--open", "--defeat-rst-ratelimit", "-Pn", "-T4"]
+    flags = ["-sS", "-p-", "--open", "--defeat-rst-ratelimit",
+             "-sV", "-sC", "-Pn", "-T4"]
 
 
 class NmapUdp1000Module(NmapBase):
     name = "nmap-udp-1000"
     flags = ["-sU", "--top-ports", "1000", "--open", "--defeat-rst-ratelimit",
-             "-Pn", "-T4"]
+             "-sV", "-sC", "-Pn", "-T4"]
 
 
 class NmapCustomModule(NmapBase):

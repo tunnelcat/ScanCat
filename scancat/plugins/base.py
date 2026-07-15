@@ -118,6 +118,28 @@ class ReconModule:
         return {} when there's nothing to contribute."""
         return {}
 
+    def display_line(self, line):
+        """Map a raw stdout line to what the live display should show for it,
+        or None to suppress it. The default shows the line unchanged; noisy
+        tools (e.g. nmap) override this to surface only notable events. The
+        full raw output is always written to the module log regardless."""
+        return line
+
+    async def _persist(self, module_dir, store, lock, key, display, mlog):
+        """Adapt the raw output and upsert it into the datastore. Called on
+        normal completion and again if the module is cancelled, so an
+        interrupted run still saves whatever the tool produced before it
+        stopped (see run())."""
+        records = self.adapt(module_dir)
+        if not records:
+            return
+        records = dedup_records(records)
+        async with lock:
+            store.init()
+            count = store.upsert(records, tool=self.name)
+        display.log(key, f"upserted {count} records")
+        mlog.write(f"upserted {count} records")
+
     async def run(self, key, display, proj, sub, lock):
         if self.binary and shutil.which(self.binary) is None:
             display.missing(key)
@@ -165,8 +187,9 @@ class ReconModule:
                 try:
                     async for raw in proc.stdout:
                         line = raw.decode(errors="replace").rstrip("\n")
-                        if line.strip():
-                            display.log(key, line)
+                        shown = self.display_line(line) if line.strip() else None
+                        if shown:
+                            display.log(key, shown)
                         mlog.write(line)
                         if tee:
                             tee.write(line + "\n")
@@ -193,6 +216,12 @@ class ReconModule:
                     mlog.write("[!] cancelled")
                     display.log(key, "[!] cancelled")
                     display.cancelled(key)
+                    # Salvage whatever the tool wrote before it was stopped.
+                    try:
+                        await self._persist(module_dir, store, lock, key,
+                                            display, mlog)
+                    except Exception:
+                        pass
                     raise
                 finally:
                     display.procs.pop(key, None)
@@ -201,14 +230,7 @@ class ReconModule:
 
             # Adapter: normalize raw output, then upsert into the subfolder
             # datastore. The lock serializes writes to the shared scancat.db.
-            records = self.adapt(module_dir)
-            if records:
-                records = dedup_records(records)
-                async with lock:
-                    store.init()
-                    count = store.upsert(records, tool=self.name)
-                display.log(key, f"upserted {count} records")
-                mlog.write(f"upserted {count} records")
+            await self._persist(module_dir, store, lock, key, display, mlog)
             display.done(key)
         finally:
             mlog.close()
