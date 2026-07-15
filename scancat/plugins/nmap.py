@@ -46,8 +46,8 @@ _RE_RESOLVE_WARN = re.compile(r"Hostname .* resolves to \d+ IPs")
 # colours them (see ui.NOTIFY): warnings yellow, errors red.
 _RE_WARN = re.compile(r"Warning", re.IGNORECASE)
 _RE_ERROR = re.compile(
-    r"QUITTING|Fail|error|denied|password|cannot|unable to|not permitted|"
-    r"requires (?:root|privile)", re.IGNORECASE)
+    r"QUITTING|Fail|error|denied|cannot|unable to|not permitted",
+    re.IGNORECASE)
 
 # nmap options that require raw sockets (root). Used to decide when to sudo.
 ROOT_FLAGS = {

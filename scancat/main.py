@@ -30,9 +30,8 @@ def _prime_sudo():
         ok = subprocess.call(["sudo", "-v"]) == 0
     except OSError:
         ok = False
-    if not ok:
-        print(colored("[!] sudo authentication failed; raw scan modes may not "
-                      "work.", "yellow"))
+    # On failure sudo has already printed its own prompt/error; scan_mode
+    # reports the abort as an error, so don't add a misleading warning here.
     return ok
 
 
