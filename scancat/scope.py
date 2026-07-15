@@ -356,6 +356,28 @@ def ensure_scope(proj, subfolders):
     return active
 
 
+def ensure_scan_scope(proj, subfolders):
+    """For each in-scope subfolder, make sure it has scan-phase targets (any
+    kind: domain/ip/cidr/range). Any without are offered the scope editor.
+    Returns the subfolders that end up with scan targets."""
+    active = []
+    for sub in subfolders:
+        store = _store_for(proj, sub)
+        has_targets = any(r["include"] for r in store.scope_active("scan"))
+        if not has_targets:
+            print(f"[!] [{sub}] has no targets in the scan scope.")
+            if questionary.confirm(f"[{sub}] Edit scan scope now?",
+                                   default=True).ask():
+                _scope_edit(proj, sub, "scan")
+        if any(r["include"] for r in store.scope_active("scan")):
+            active.append(sub)
+        else:
+            print(f"[!] [{sub}] skipped - populate it with "
+                  f"'scancat scope expand --sub {sub}' or "
+                  f"'scancat scope add <target> --phase scan --sub {sub}'")
+    return active
+
+
 def _target_subs(proj, args, existing, allow_all):
     """Resolve which subfolders a scope command targets. --sub selects
     explicitly (repeatable, comma-separated); otherwise mutating commands

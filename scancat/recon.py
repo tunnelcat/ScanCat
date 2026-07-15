@@ -1,5 +1,6 @@
-"""Recon orchestration: run every module against every in-scope subfolder
-concurrently, driving a single live display.
+"""Module orchestration: run a set of modules against every in-scope subfolder
+concurrently, driving a single live display. Used for both the recon modules
+(MODULES, below) and the scan modules (scancat.plugins.nmap.SCAN_MODULES).
 """
 import asyncio
 import base64
@@ -187,7 +188,7 @@ def _install_key_reader(loop, display, handlers):
     return cleanup
 
 
-async def run_recon(proj, scope, enabled_modules=None):
+async def run_modules(proj, scope, modules, enabled_modules=None):
     display = LiveDisplay(",".join(scope))
     # Rich owns the single refresh timer (auto_refresh); the display object
     # is itself the renderable, so there's no second timer to race -> no
@@ -204,8 +205,8 @@ async def run_recon(proj, scope, enabled_modules=None):
     for sub in scope:
         SubfolderStore(proj.subfolder_path(sub) / "scancat.db").init()
 
-    active_modules = MODULES if enabled_modules is None else \
-        [m for m in MODULES if m.name in enabled_modules]
+    active_modules = modules if enabled_modules is None else \
+        [m for m in modules if m.name in enabled_modules]
 
     # key -> (module class, subfolder); lets us (re)spawn any module on demand.
     module_by_key = {}

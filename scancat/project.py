@@ -37,6 +37,8 @@ class Project:
     subfolders: list = field(default_factory=list)
     scope: list = field(default_factory=list)
     enabled_modules: list = field(default_factory=list)
+    enabled_scan_modules: list = field(default_factory=list)
+    custom_scan_flags: str = ""
     scan_noise: list = field(
         default_factory=lambda: list(DEFAULT_SCAN_NOISE))
 
@@ -60,6 +62,8 @@ class Project:
             "subfolders": self.subfolders,
             "scope": self.scope,
             "enabled_modules": self.enabled_modules,
+            "enabled_scan_modules": self.enabled_scan_modules,
+            "custom_scan_flags": self.custom_scan_flags,
             "scan_noise": self.scan_noise,
         }
         with open(self.config_path, "w") as f:
@@ -78,6 +82,8 @@ def load_project(root):
         subfolders=data.get("subfolders", []) or [],
         scope=data.get("scope", []) or [],
         enabled_modules=data.get("enabled_modules", []) or [],
+        enabled_scan_modules=data.get("enabled_scan_modules", []) or [],
+        custom_scan_flags=data.get("custom_scan_flags", "") or "",
         scan_noise=(data.get("scan_noise") or list(DEFAULT_SCAN_NOISE)),
     )
 

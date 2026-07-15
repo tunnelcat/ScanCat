@@ -102,6 +102,8 @@ class ReconModule:
     out_datatypes = []       # data-type tags produced, e.g. ["host"]
     depends_on = []          # out_datatype tags that must finish (same
                              # subfolder) before this runs; [] = start now
+    output_dir = None        # working dir under the subfolder; defaults to
+                             # self.name, but modes can share one (e.g. nmap)
 
     def build(self, module_dir, domains):
         """Return the list of Command objects to run. `domains` is the
@@ -122,8 +124,9 @@ class ReconModule:
             display.log(key, f"[!] '{self.binary}' not found on PATH")
             return
 
+        self.proj = proj
         subfolder_dir = proj.subfolder_path(sub)
-        module_dir = subfolder_dir / self.name
+        module_dir = subfolder_dir / (self.output_dir or self.name)
         module_dir.mkdir(parents=True, exist_ok=True)
         # Scope in scancat.db is the sole source of truth for targets; a module
         # reads its own phase (recon modules -> the recon scope).
@@ -143,10 +146,12 @@ class ReconModule:
                         *cmd.argv,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
-                        # Own session/process group so a terminal Ctrl+C
-                        # (sent to the foreground group) doesn't kill the tool
-                        # directly - only scancat's handler decides its fate.
-                        start_new_session=True,
+                        # Own process group so a terminal Ctrl+C (sent to the
+                        # foreground group) doesn't kill the tool directly - only
+                        # scancat's handler decides its fate. A new *group* (not
+                        # a new session) keeps the controlling tty, so `sudo -n`
+                        # can still find the credentials primed before the run.
+                        process_group=0,
                     )
                 except FileNotFoundError:
                     display.missing(key)

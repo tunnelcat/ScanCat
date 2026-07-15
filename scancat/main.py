@@ -1,12 +1,34 @@
 import argparse
 import asyncio
+import os
+import shutil
+import subprocess
 import sys
 
 from .banner import display_banner
-from .folderselect import ensure_project, select_scope, select_modules
-from .recon import run_recon
-from .scope import cmd_scope, ensure_scope
+from .folderselect import (ensure_project, select_scope, select_modules,
+                          select_scan_modules)
+from .recon import run_modules, MODULES
+from .plugins.nmap import SCAN_MODULES, scan_needs_root
+from .scope import cmd_scope, ensure_scope, ensure_scan_scope
 from .tools import warn_missing_tools
+
+
+def _prime_sudo():
+    """Cache sudo credentials before the scan TUI starts, so root-requiring
+    modes can run as `sudo -n nmap` without a password prompt appearing (and
+    hanging) inside the alternate-screen display. Returns True if usable."""
+    if shutil.which("sudo") is None:
+        print("[!] sudo not found; run scancat as root for raw scans.")
+        return False
+    print("[*] Some selected scan modes need root; caching sudo credentials...")
+    try:
+        ok = subprocess.call(["sudo", "-v"]) == 0
+    except OSError:
+        ok = False
+    if not ok:
+        print("[!] sudo authentication failed; raw scan modes may not work.")
+    return ok
 
 
 def recon_mode(args, proj):
@@ -22,11 +44,25 @@ def recon_mode(args, proj):
     if not active:
         print("No subfolders have targets in scope. Nothing to run.")
         return
-    asyncio.run(run_recon(proj, active, enabled_modules))
+    asyncio.run(run_modules(proj, active, MODULES, enabled_modules))
 
 
 def scan_mode(args, proj):
-    print("Running scan mode - TODO")
+    scope = select_scope(proj)
+    if not scope:
+        print("No subfolders in scope. Nothing to do.")
+        return
+    enabled_modules = select_scan_modules(proj)
+    if not enabled_modules:
+        print("No scan modules selected. Nothing to run.")
+        return
+    active = ensure_scan_scope(proj, scope)
+    if not active:
+        print("No subfolders have targets in the scan scope. Nothing to run.")
+        return
+    proj.use_sudo = (scan_needs_root(enabled_modules, proj)
+                     and os.geteuid() != 0 and _prime_sudo())
+    asyncio.run(run_modules(proj, active, SCAN_MODULES, enabled_modules))
 
 
 def vuln_mode(args, proj):

@@ -106,16 +106,38 @@ def select_scope(proj):
     return scope
 
 
-def select_modules(proj):
+def select_modules(proj, modules=None, attr="enabled_modules"):
     """Interactive module picker. Defaults to the memorized selection (or
-    all modules enabled)."""
-    available = [m.name for m in MODULES]
-    default_enabled = proj.enabled_modules or available
+    all modules enabled). `attr` is the Project field the selection persists to
+    (recon and scan remember their picks separately)."""
+    modules = MODULES if modules is None else modules
+    available = [m.name for m in modules]
+    default_enabled = getattr(proj, attr) or available
     choices = [questionary.Choice(name, checked=(name in default_enabled))
                for name in available]
     enabled = checkbox("Select modules to run:", choices) or []
 
-    proj.enabled_modules = enabled
+    setattr(proj, attr, enabled)
     proj.save()
     print(colored(f"[+] Modules: [{','.join(enabled)}]", "cyan"))
+    return enabled
+
+
+def select_scan_modules(proj):
+    """Scan (nmap) module picker. Same as select_modules, but if the custom
+    mode is selected it also prompts for the nmap flags to run (remembered
+    between runs); with no flags given, the custom mode is dropped."""
+    from .plugins.nmap import SCAN_MODULES, NmapCustomModule
+
+    enabled = select_modules(proj, SCAN_MODULES, "enabled_scan_modules")
+    if NmapCustomModule.name in enabled:
+        flags = questionary.text(
+            "Custom nmap flags (override the global flags):",
+            default=proj.custom_scan_flags or "").ask()
+        proj.custom_scan_flags = (flags or "").strip()
+        proj.save()
+        if not proj.custom_scan_flags:
+            print(colored("[!] No custom flags given; skipping nmap-custom.",
+                          "yellow"))
+            enabled = [m for m in enabled if m != NmapCustomModule.name]
     return enabled

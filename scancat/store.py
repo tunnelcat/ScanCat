@@ -16,15 +16,23 @@ tool output into the common intermediate schema below, and `upsert()` writes it:
 
     {
       "hosts":  [{"name": str, "resolvable": bool|None, "status_code": str|None}],
-      "ips":    [{"address": str, "version": int|None}],
+      "ips":    [{"address": str, "version": int|None,
+                  "os_name": str|None, "os_accuracy": int|None, "os_cpe": str|None}],
       "dns":    [{"host": str, "type": str, "value": str}],   # A/AAAA/CNAME/...
       "emails": [{"address": str, "host": str|None}],   # host = domain it came from
+      "ports":  [{"ip": str, "proto": str, "port": int, "state": str|None,
+                  "reason"/"service"/"product"/"version"/"extrainfo"/"tunnel"/
+                  "cpe"/"conf": ...}],                  # nmap scan results
+      "scripts":[{"ip": str, "proto": str|None, "port": int|None,
+                  "script_id": str, "output": str|None, "data": str|None}],
     }
 
 Any key may be omitted. A `dns` row's host is upserted as a host too, so the
 hosts table always covers every name referenced by a record. A/AAAA `dns` rows
 are stored as `resolutions` (host -> ip): the value is upserted into `ips` and
 linked, rather than duplicated as text; other record types go to `dns_records`.
+A `scripts` row with a port (ip+proto+port) attaches to that port row; without
+one it's a host-level script (port_id NULL).
 """
 import sqlite3
 from datetime import datetime, timezone
@@ -40,11 +48,14 @@ CREATE TABLE IF NOT EXISTS hosts (
     last_seen   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS ips (
-    id         INTEGER PRIMARY KEY,
-    address    TEXT NOT NULL UNIQUE,
-    version    INTEGER,           -- 4 or 6
-    first_seen TEXT NOT NULL,
-    last_seen  TEXT NOT NULL
+    id          INTEGER PRIMARY KEY,
+    address     TEXT NOT NULL UNIQUE,
+    version     INTEGER,          -- 4 or 6
+    os_name     TEXT,             -- top nmap OS match (-O/-A); NULL until run
+    os_accuracy INTEGER,          -- that match's accuracy 0-100
+    os_cpe      TEXT,             -- json array of cpe strings
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS dns_records (
     id          INTEGER PRIMARY KEY,
@@ -63,6 +74,38 @@ CREATE TABLE IF NOT EXISTS resolutions (
     last_seen  TEXT NOT NULL,     --   (A vs AAAA is implied by ips.version)
     UNIQUE(host_id, ip_id)
 );
+CREATE TABLE IF NOT EXISTS ports (
+    id         INTEGER PRIMARY KEY,
+    ip_id      INTEGER NOT NULL REFERENCES ips(id) ON DELETE CASCADE,
+    proto      TEXT NOT NULL,     -- 'tcp' | 'udp'
+    port       INTEGER NOT NULL,
+    state      TEXT,              -- open | open|filtered | filtered | ...
+    reason     TEXT,              -- syn-ack, no-response, ...
+    service    TEXT,              -- service name; the rest are filled by -sV
+    product    TEXT,
+    version    TEXT,              -- service version string
+    extrainfo  TEXT,
+    tunnel     TEXT,              -- e.g. ssl
+    cpe        TEXT,              -- json array of cpe strings
+    conf       INTEGER,           -- service detection confidence 0-10
+    first_seen TEXT NOT NULL,
+    last_seen  TEXT NOT NULL,
+    UNIQUE(ip_id, proto, port)
+);
+CREATE TABLE IF NOT EXISTS scripts (
+    id         INTEGER PRIMARY KEY,
+    ip_id      INTEGER NOT NULL REFERENCES ips(id)   ON DELETE CASCADE,
+    port_id    INTEGER REFERENCES ports(id) ON DELETE CASCADE,  -- NULL = host script
+    script_id  TEXT NOT NULL,     -- NSE id: 'http-title', 'vulners', ...
+    output     TEXT,              -- raw script output
+    data       TEXT,              -- structured NSE output as json (nullable)
+    first_seen TEXT NOT NULL,
+    last_seen  TEXT NOT NULL
+);
+-- COALESCE so host scripts (port_id NULL) still dedup: SQLite treats NULLs as
+-- distinct in a plain UNIQUE, which would let them pile up on re-scan.
+CREATE UNIQUE INDEX IF NOT EXISTS scripts_uq
+    ON scripts(ip_id, COALESCE(port_id, 0), script_id);
 CREATE TABLE IF NOT EXISTS emails (
     id         INTEGER PRIMARY KEY,
     address    TEXT NOT NULL UNIQUE,
@@ -71,7 +114,7 @@ CREATE TABLE IF NOT EXISTS emails (
     last_seen  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS observations (
-    entity_type TEXT NOT NULL,    -- 'host'|'ip'|'dns_record'|'resolution'|'email'
+    entity_type TEXT NOT NULL,    -- 'host'|'ip'|'dns_record'|'resolution'|'email'|'port'|'script'
     entity_id   INTEGER NOT NULL,
     tool        TEXT NOT NULL,
     first_seen  TEXT NOT NULL,
@@ -147,7 +190,10 @@ class SubfolderStore:
                 n += 1
             for ip in records.get("ips", []):
                 eid = self._upsert(conn, "ips", ["address"], [ip["address"]],
-                                   {"version": ip.get("version")}, when)
+                                   {"version": ip.get("version"),
+                                    "os_name": ip.get("os_name"),
+                                    "os_accuracy": ip.get("os_accuracy"),
+                                    "os_cpe": ip.get("os_cpe")}, when)
                 self._observe(conn, "ip", eid, tool, when)
                 n += 1
             for r in records.get("dns", []):
@@ -179,7 +225,48 @@ class SubfolderStore:
                                    {"host_id": hid}, when)
                 self._observe(conn, "email", eid, tool, when)
                 n += 1
+            for p in records.get("ports", []):
+                # ip row already carries version/os from the ips list; here we
+                # just resolve its id (extra={} leaves those columns intact).
+                ipid = self._upsert(conn, "ips", ["address"], [p["ip"]], {}, when)
+                pid = self._upsert(
+                    conn, "ports", ["ip_id", "proto", "port"],
+                    [ipid, p["proto"], p["port"]],
+                    {k: p.get(k) for k in ("state", "reason", "service",
+                     "product", "version", "extrainfo", "tunnel", "cpe",
+                     "conf")}, when)
+                self._observe(conn, "port", pid, tool, when)
+                n += 1
+            for sc in records.get("scripts", []):
+                ipid = self._upsert(conn, "ips", ["address"], [sc["ip"]], {}, when)
+                port_id = None
+                if sc.get("port") is not None:
+                    row = conn.execute(
+                        "SELECT id FROM ports WHERE ip_id=? AND proto=? AND port=?",
+                        (ipid, sc.get("proto"), sc["port"])).fetchone()
+                    port_id = row[0] if row else None
+                sid = self._upsert_script(conn, ipid, port_id, sc["script_id"],
+                                          sc.get("output"), sc.get("data"), when)
+                self._observe(conn, "script", sid, tool, when)
+                n += 1
         return n
+
+    @staticmethod
+    def _upsert_script(conn, ip_id, port_id, script_id, output, data, when):
+        """Upsert one NSE script row. Dedups on (ip_id, port_id-or-0, script_id)
+        via the scripts_uq expression index so host scripts (port_id NULL) don't
+        pile up. Output/data only overwrite when the new value is non-NULL."""
+        row = conn.execute(
+            """INSERT INTO scripts (ip_id, port_id, script_id, output, data,
+                    first_seen, last_seen)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(ip_id, COALESCE(port_id, 0), script_id) DO UPDATE SET
+                   output = COALESCE(excluded.output, scripts.output),
+                   data   = COALESCE(excluded.data, scripts.data),
+                   last_seen = excluded.last_seen
+               RETURNING id""",
+            (ip_id, port_id, script_id, output, data, when, when)).fetchone()
+        return row[0]
 
     @staticmethod
     def _upsert(conn, table, key_cols, key_vals, extra, when):
