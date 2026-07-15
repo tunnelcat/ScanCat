@@ -33,6 +33,11 @@ GLOBAL_FLAGS = ["-vv", "--resolve-all", "--unique"]
 
 # Lines worth surfacing live from nmap's -vv firehose (see NmapBase.display_line).
 _RE_PORT = re.compile(r"Discovered open port (\d+)/(\w+) on (\S+)")
+# A port row from the per-host report table, e.g.
+#   "22/tcp   open  ssh     OpenSSH 6.6.1p1 Ubuntu ..."  ->  port/proto/state/
+# service/version. Printed as each host completes, carrying the -sV/-sC detail.
+_RE_PORTLINE = re.compile(
+    r"^(\d+)/(tcp|udp|sctp)\s+(\S+)\s+(\S+)(?:\s+(.*\S))?\s*$")
 _RE_REPORT = re.compile(r"Nmap scan report for (.+)")
 _RE_HOST_UP = re.compile(r"Host is up(?:, received (\S+))?")
 # Failures/warnings we never want to hide behind the filter.
@@ -209,6 +214,12 @@ class NmapBase(ReconModule):
         if m:
             port, proto, host = m.groups()
             return f"[+] {host}  open  {proto}/{port}"
+        m = _RE_PORTLINE.match(line)
+        if m:
+            port, proto, _state, service, version = m.groups()
+            host = getattr(self, "_last_host", "?")
+            extra = f"  {version}" if version else ""
+            return f"[+] {host}  {proto}/{port}  {service}{extra}"
         m = _RE_REPORT.search(line)
         if m:
             self._last_host = m.group(1).strip()
@@ -315,10 +326,21 @@ class NmapTcpAllModule(NmapBase):
              "-sV", "-sC", "-Pn", "-T4"]
 
 
-class NmapUdp1000Module(NmapBase):
-    name = "nmap-udp-1000"
-    flags = ["-sU", "--top-ports", "1000", "--open", "--defeat-rst-ratelimit",
+class NmapUdp200Module(NmapBase):
+    name = "nmap-udp-200"
+    flags = ["-sU", "--top-ports", "200", "--open", "--defeat-rst-ratelimit",
              "-sV", "-sC", "-Pn", "-T4"]
+
+
+class NmapUdpSelectModule(NmapBase):
+    """UDP scan of a curated set of the commonly-interesting service ports
+    (DNS, SNMP, NTP, IKE, mDNS, UPnP, NetBIOS, ...) - much faster than the
+    top-200 sweep when you already know what you're hunting for."""
+    name = "nmap-udp-select"
+    flags = ["-sU",
+             "-p", "U:25,53,67-69,111,123,135,137-139,161-162,177,445,500,"
+                   "514,520,623,631,998,1194,1434,1701,1900,4500,5353",
+             "--open", "--defeat-rst-ratelimit", "-sV", "-sC", "-Pn", "-T4"]
 
 
 class NmapCustomModule(NmapBase):
@@ -340,7 +362,8 @@ SCAN_MODULES = [
     NmapFastModule,
     NmapTcp1000Module,
     NmapTcpAllModule,
-    NmapUdp1000Module,
+    NmapUdp200Module,
+    NmapUdpSelectModule,
     NmapCustomModule,
 ]
 
