@@ -33,11 +33,13 @@ GLOBAL_FLAGS = ["-vv", "--resolve-all", "--unique"]
 
 # Lines worth surfacing live from nmap's -vv firehose (see NmapBase.display_line).
 _RE_PORT = re.compile(r"Discovered open port (\d+)/(\w+) on (\S+)")
-# A port row from the per-host report table, e.g.
-#   "22/tcp   open  ssh     OpenSSH 6.6.1p1 Ubuntu ..."  ->  port/proto/state/
-# service/version. Printed as each host completes, carrying the -sV/-sC detail.
+# A port row from the per-host report table, e.g. (-vv adds the REASON column)
+#   "22/tcp open ssh syn-ack ttl 64 OpenSSH 6.6.1p1 Ubuntu"  ->  port/proto/
+# state/service/version. The reason token (+ optional "ttl N") is matched but
+# dropped. Printed as each host completes, carrying the -sV/-sC detail.
 _RE_PORTLINE = re.compile(
-    r"^(\d+)/(tcp|udp|sctp)\s+(\S+)\s+(\S+)(?:\s+(.*\S))?\s*$")
+    r"^(\d+)/(tcp|udp|sctp)\s+(\S+)\s+(\S+)\s+\S+(?:\s+ttl\s+\d+)?"
+    r"(?:\s+(.*\S))?\s*$")
 _RE_REPORT = re.compile(r"Nmap scan report for (.+)")
 _RE_HOST_UP = re.compile(r"Host is up(?:, received (\S+))?")
 # --resolve-all emits one of these per multi-homed hostname; pure noise.
