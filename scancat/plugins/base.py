@@ -55,7 +55,8 @@ _RECORD_KEYS = {
 # boundaries keep hostnames like "failover.example.com" from tripping it.
 _RE_ERROR = re.compile(
     r"\b(error|fail(?:ed|ure)?|fatal|exception|traceback|denied|refused|"
-    r"unable to|cannot|not permitted|quitting)\b", re.IGNORECASE)
+    r"timed out|timeout|unable to|cannot|not permitted|quitting)\b",
+    re.IGNORECASE)
 _RE_WARN = re.compile(r"\bwarn(?:ing)?\b", re.IGNORECASE)
 
 

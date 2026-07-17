@@ -51,14 +51,19 @@ class TheHarvesterModule(ReconModule):
                 return f"[*] {name} found: {m.group(2)}"
             return None
         if _RE_TH_SEARCH.match(stripped):
+            self._th_tag = None   # new search phase: no result section is active
             return None
+        # Error/failure wording always wins, even inside a surfaced section, so
+        # a stray failure line isn't mislabeled as a finding.
+        failure = notify_failure(stripped)
+        if failure:
+            return failure
         # Value line: only shown while inside a surfaced section. Header/banner
         # lines never reach here as data because no section is active yet.
         tag = getattr(self, "_th_tag", None)
         if tag and not stripped.startswith(("[", "*", "-", "=")):
             return f"{tag} {stripped}"
-        # Anything left (source failures, tracebacks) gets error/warning tagging.
-        return notify_failure(stripped)
+        return None
 
     def adapt(self, module_dir):
         # Deduplication is the datastore's job (unique keys + upsert), so this
