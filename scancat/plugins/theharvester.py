@@ -1,9 +1,22 @@
 """theHarvester OSINT recon, run once per domain."""
 import json
+import re
 
-from .base import ReconModule, Command, normalize_host, ip_version
+from .base import (ReconModule, Command, normalize_host, ip_version,
+                   notify_failure)
 
 SOURCES = ("all")
+
+# theHarvester prints results grouped under "[*] <Section> found: N" headers.
+# We only surface the sections that carry recon value; the rest (ASNs, urls,
+# social handles, ...) plus the banner and per-source progress are dropped.
+_RE_TH_SECTION = re.compile(r"^\[\*\]\s*(.+?) found:\s*(\d+)", re.I)
+_RE_TH_SEARCH = re.compile(r"^\[\*\]\s*Searching\b", re.I)
+# Logger lines carry an uppercase level token; drop the INFO ones. Case matters
+# so a lowercase host like "info.example.com" isn't swept up with them.
+_RE_TH_INFO = re.compile(r"\bINFO\b")
+# Map a shown section to the notification tag its values get in the TUI.
+_TH_SECTIONS = {"hosts": "[+]", "ips": "[+]", "emails": "[*]"}
 
 
 class TheHarvesterModule(ReconModule):
@@ -19,6 +32,33 @@ class TheHarvesterModule(ReconModule):
                     "-f", str(module_dir / filename)]
             commands.append(Command(argv))
         return commands
+
+    def display_line(self, line):
+        # theHarvester is chatty: an ASCII banner, a "[*] Searching X." line per
+        # source, and result sections split by "----" rules. Track the current
+        # section from its "found:" header and only echo values under the ones
+        # worth showing (hosts/ips/emails); suppress everything else.
+        stripped = line.strip()
+        if not stripped:
+            return None
+        if _RE_TH_INFO.search(stripped):   # suppress INFO-level log lines
+            return None
+        m = _RE_TH_SECTION.match(stripped)
+        if m:
+            name = m.group(1).strip()
+            self._th_tag = _TH_SECTIONS.get(name.lower())
+            if self._th_tag:
+                return f"[*] {name} found: {m.group(2)}"
+            return None
+        if _RE_TH_SEARCH.match(stripped):
+            return None
+        # Value line: only shown while inside a surfaced section. Header/banner
+        # lines never reach here as data because no section is active yet.
+        tag = getattr(self, "_th_tag", None)
+        if tag and not stripped.startswith(("[", "*", "-", "=")):
+            return f"{tag} {stripped}"
+        # Anything left (source failures, tracebacks) gets error/warning tagging.
+        return notify_failure(stripped)
 
     def adapt(self, module_dir):
         # Deduplication is the datastore's job (unique keys + upsert), so this

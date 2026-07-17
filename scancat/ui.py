@@ -19,12 +19,9 @@ from rich.console import Console, Group
 from rich.table import Table
 from rich.text import Text
 
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+from .notify import NOTIFY_COLORS as NOTIFY   # token -> colour (shared source)
 
-# scancat's notification convention, shared by the TUI and console output:
-# a leading token tags each line's severity, and the TUI colours the token.
-#   [+] finding/success  [*] info  [!] warning  [-] error
-NOTIFY = {"[+]": "green", "[*]": "cyan", "[!]": "yellow", "[-]": "red"}
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 class LiveDisplay:
@@ -262,7 +259,11 @@ class LiveDisplay:
         if t["paused_at"] is not None:      # currently paused: freeze the clock
             paused += end - t["paused_at"]
         secs = max(0, int(end - t["start"] - paused))
-        return f"{secs // 60:02d}:{secs % 60:02d}"
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        if h:                               # only widen to H:MM:SS past an hour
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
 
     def _statuses_pane(self):
         frame = SPINNER[int(time.time() * 12) % len(SPINNER)]
@@ -313,15 +314,16 @@ class LiveDisplay:
         return Text("\n").join(rows) if rows else Text()
 
     def _output_pane(self, height):
-        """A `height`-tall window into the log. Normally shows the tail
-        (bottom-anchored, top-padded with blanks); when scrolled back it
-        shows an older slice. self.scroll is clamped to the valid range."""
+        """A `height`-tall window into the log. Shows the tail
+        (top-anchored: lines fill from the top down, bottom-padded with
+        blanks); when scrolled back it shows an older slice. self.scroll is
+        clamped to the valid range."""
         total = len(self.logs)
         self.scroll = max(0, min(self.scroll, max(0, total - height)))
         end = total - self.scroll
         start = max(0, end - height)
         recent = list(self.logs)[start:end]
-        rows = [Text() for _ in range(height - len(recent))]
+        rows = []
         for offset, (sub, module, line) in enumerate(recent):
             idx = start + offset
             if self.selecting and self.sel_top <= idx <= self.sel_bot:
@@ -339,6 +341,7 @@ class LiveDisplay:
                 else:
                     t.append(line)
                 rows.append(t)
+        rows += [Text() for _ in range(height - len(recent))]   # pad below
         return Text("\n").join(rows)
 
     def _hint(self):

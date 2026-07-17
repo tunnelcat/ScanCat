@@ -30,6 +30,7 @@ import tempfile
 
 import questionary
 
+from .notify import nprint
 from .plugins.base import FQDN_RE
 from .store import SubfolderStore
 
@@ -344,15 +345,15 @@ def ensure_scope(proj, subfolders):
     for sub in subfolders:
         store = _store_for(proj, sub)
         if not store.scope_domains("recon"):
-            print(f"[!] [{sub}] has no domains in the recon scope.")
+            nprint(f"[!] [{sub}] has no targets in the recon scope.")
             if questionary.confirm(f"[{sub}] Edit recon scope now?",
                                    default=True).ask():
                 _scope_edit(proj, sub, "recon")
         if store.scope_domains("recon"):
             active.append(sub)
         else:
-            print(f"[!] [{sub}] skipped - set targets with "
-                  f"'scancat scope add <target> --phase recon --sub {sub}'")
+            nprint(f"[!] [{sub}] skipped - set targets with "
+                   f"'scancat scope add <target> --phase recon --sub {sub}'")
     return active
 
 
@@ -365,16 +366,16 @@ def ensure_scan_scope(proj, subfolders):
         store = _store_for(proj, sub)
         has_targets = any(r["include"] for r in store.scope_active("scan"))
         if not has_targets:
-            print(f"[!] [{sub}] has no targets in the scan scope.")
+            nprint(f"[!] [{sub}] has no targets in the scan scope.")
             if questionary.confirm(f"[{sub}] Edit scan scope now?",
                                    default=True).ask():
                 _scope_edit(proj, sub, "scan")
         if any(r["include"] for r in store.scope_active("scan")):
             active.append(sub)
         else:
-            print(f"[!] [{sub}] skipped - populate it with "
-                  f"'scancat scope expand --sub {sub}' or "
-                  f"'scancat scope add <target> --phase scan --sub {sub}'")
+            nprint(f"[!] [{sub}] skipped - populate it with "
+                   f"'scancat scope expand --sub {sub}' or "
+                   f"'scancat scope add <target> --phase scan --sub {sub}'")
     return active
 
 

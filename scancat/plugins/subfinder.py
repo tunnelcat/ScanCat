@@ -1,7 +1,7 @@
 """subfinder passive subdomain enumeration."""
 import json
 
-from .base import ReconModule, Command, normalize_host
+from .base import ReconModule, Command, normalize_host, notify_failure
 
 
 class SubfinderModule(ReconModule):
@@ -16,6 +16,19 @@ class SubfinderModule(ReconModule):
         argv = ["subfinder", "-silent", "-nc", "-all", "-dL", str(list_file),
                 "-oJ", "-o", str(module_dir / "subfinder-out.json")]
         return [Command(argv)]
+
+    def display_line(self, line):
+        # subfinder streams one JSON object per discovered subdomain; surface
+        # just the host so the TUI reads as a clean list of finds.
+        line = line.strip()
+        if not line:
+            return None
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return notify_failure(line)   # non-JSON => possibly an error/warning
+        host = normalize_host(data.get("host"))
+        return f"[+] {host}" if host else None
 
     def adapt(self, module_dir):
         out_file = module_dir / "subfinder-out.json"

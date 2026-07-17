@@ -7,8 +7,14 @@ in the subfolder datastore. Its adapter records each host's resolvability
 """
 import json
 
-from .base import ReconModule, Command, normalize_host, ip_version
+from .base import (ReconModule, Command, normalize_host, ip_version,
+                   notify_failure)
 from ..store import SubfolderStore
+
+# Record types we query and surface, in display order. dnsx only queries A by
+# default, so CNAME/MX/NS/TXT have to be requested explicitly. IPv6 (AAAA) is
+# intentionally left out.
+QUERY_TYPES = ("a", "cname", "mx", "ns", "txt")
 
 
 class DnsxModule(ReconModule):
@@ -29,7 +35,30 @@ class DnsxModule(ReconModule):
 
         argv = ["dnsx", "-l", str(list_file), "-silent", "-resp", "-nc",
                 "-json", "-or", "-o", str(module_dir / "dnsx-out.json")]
+        argv += [f"-{t}" for t in QUERY_TYPES]
         return [Command(argv)]
+
+    def display_line(self, line):
+        # dnsx streams one JSON object per resolved host; render it as a single
+        # readable line: the host followed by each record type it answered with.
+        line = line.strip()
+        if not line:
+            return None
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return notify_failure(line)   # non-JSON => possibly an error/warning
+        host = normalize_host(data.get("host"))
+        if not host:
+            return None
+        parts = []
+        for rtype in QUERY_TYPES:
+            vals = data.get(rtype)
+            if vals:
+                parts.append(f"{rtype.upper()} {', '.join(vals)}")
+        if not parts:
+            return None   # resolved but no records worth listing
+        return f"[+] {host}  " + "  ".join(parts)
 
     def adapt(self, module_dir):
         out_file = module_dir / "dnsx-out.json"
@@ -54,15 +83,21 @@ class DnsxModule(ReconModule):
             status = data.get("status_code")
             hosts.append({"name": host, "status_code": status,
                           "resolvable": status == "NOERROR"})
-            for rtype, want in (("a", 4), ("aaaa", 6)):
-                for ip in (data.get(rtype) or []):
-                    ip = ip.strip()
-                    if ip and ip_version(ip) == want:
-                        dns.append({"host": host, "type": rtype.upper(),
-                                    "value": ip})
+            for ip in (data.get("a") or []):
+                ip = ip.strip()
+                if ip and ip_version(ip) == 4:
+                    dns.append({"host": host, "type": "A", "value": ip})
             for cname in (data.get("cname") or []):
                 target = cname.strip().lower().rstrip(".")
                 if target:
                     dns.append({"host": host, "type": "CNAME", "value": target})
+            # MX/NS/TXT go to dns_records as opaque values. TXT is case-
+            # sensitive (SPF/verification tokens), so only strip whitespace.
+            for rtype in ("mx", "ns", "txt"):
+                for val in (data.get(rtype) or []):
+                    val = val.strip()
+                    if val:
+                        dns.append({"host": host, "type": rtype.upper(),
+                                    "value": val})
 
         return {"hosts": hosts, "dns": dns}

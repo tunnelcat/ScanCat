@@ -50,6 +50,30 @@ _RECORD_KEYS = {
 }
 
 
+# Failure wording surfaced from any tool's output so errors/warnings never hide
+# behind a module's display filter (mirrors the nmap plugin's tagging). Word
+# boundaries keep hostnames like "failover.example.com" from tripping it.
+_RE_ERROR = re.compile(
+    r"\b(error|fail(?:ed|ure)?|fatal|exception|traceback|denied|refused|"
+    r"unable to|cannot|not permitted|quitting)\b", re.IGNORECASE)
+_RE_WARN = re.compile(r"\bwarn(?:ing)?\b", re.IGNORECASE)
+
+
+def notify_failure(line):
+    """Return `line` tagged as an error ([-]) or warning ([!]) notification if
+    its wording signals trouble, else None. Recon plugins call this as a
+    fallback so a tool's failures aren't swallowed by their output filter."""
+    text = line.strip()
+    # Drop a leading tool status marker (e.g. theHarvester's "[!]") so our own
+    # notification tag doesn't stack on top of it.
+    text = re.sub(r"^\[.\]\s*", "", text)
+    if _RE_ERROR.search(text):
+        return f"[-] {text}"
+    if _RE_WARN.search(text):
+        return f"[!] {text}"
+    return None
+
+
 def dedup_records(records):
     """Return `records` with duplicate rows dropped from each list (first
     occurrence wins, by the list's natural unique key). Relying on the DB's
@@ -137,8 +161,8 @@ class ReconModule:
         async with lock:
             store.init()
             count = store.upsert(records, tool=self.name)
-        display.log(key, f"[*] upserted {count} records")
-        mlog.write(f"[*] upserted {count} records")
+        display.log(key, f"[*] Upserted {count} records into scancat.db")
+        mlog.write(f"[*] Upserted {count} records into scancat.db")
 
     async def run(self, key, display, proj, sub, lock):
         if self.binary and shutil.which(self.binary) is None:
