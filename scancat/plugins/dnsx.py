@@ -38,16 +38,14 @@ class DnsxModule(ReconModule):
         argv += [f"-{t}" for t in QUERY_TYPES]
         return [Command(argv)]
 
-    def display_line(self, line):
+    def emit(self, line):
         # dnsx streams one JSON object per resolved host; render it as a single
         # readable line: the host followed by each record type it answered with.
-        line = line.strip()
-        if not line:
-            return None
+        # Non-JSON lines are the tool's own output, so error-check only then.
         try:
-            data = json.loads(line)
+            data = json.loads(line.strip())
         except json.JSONDecodeError:
-            return notify_failure(line)   # non-JSON => possibly an error/warning
+            return notify_failure(line)
         host = normalize_host(data.get("host"))
         if not host:
             return None

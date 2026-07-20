@@ -17,16 +17,15 @@ class SubfinderModule(ReconModule):
                 "-oJ", "-o", str(module_dir / "subfinder-out.json")]
         return [Command(argv)]
 
-    def display_line(self, line):
+    def emit(self, line):
         # subfinder streams one JSON object per discovered subdomain; surface
-        # just the host so the TUI reads as a clean list of finds.
-        line = line.strip()
-        if not line:
-            return None
+        # just the host. A line that isn't JSON is the tool's own output (e.g.
+        # an error), so error-check only then - a valid host named
+        # "error.example.com" must stay a finding, not get tagged as an error.
         try:
-            data = json.loads(line)
+            data = json.loads(line.strip())
         except json.JSONDecodeError:
-            return notify_failure(line)   # non-JSON => possibly an error/warning
+            return notify_failure(line)
         host = normalize_host(data.get("host"))
         return f"[+] {host}" if host else None
 

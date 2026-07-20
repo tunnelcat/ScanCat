@@ -31,7 +31,7 @@ from ..store import SubfolderStore
 # Applied to every preset mode; the custom mode overrides them with its own.
 GLOBAL_FLAGS = ["-vv", "--resolve-all", "--unique"]
 
-# Lines worth surfacing live from nmap's -vv firehose (see NmapBase.display_line).
+# Lines worth surfacing live from nmap's -vv firehose (see NmapBase.emit).
 _RE_PORT = re.compile(r"Discovered open port (\d+)/(\w+) on (\S+)")
 # A port row from the per-host report table, e.g. (-vv adds the REASON column)
 #   "22/tcp open ssh syn-ack ttl 64 OpenSSH 6.6.1p1 Ubuntu"  ->  port/proto/
@@ -42,14 +42,6 @@ _RE_PORTLINE = re.compile(
     r"(?:\s+(.*\S))?\s*$")
 _RE_REPORT = re.compile(r"Nmap scan report for (.+)")
 _RE_HOST_UP = re.compile(r"Host is up(?:, received (\S+))?")
-# --resolve-all emits one of these per multi-homed hostname; pure noise.
-_RE_RESOLVE_WARN = re.compile(r"Hostname .* resolves to \d+ IPs")
-# Failures/warnings we never want to hide behind the filter; tagged so the TUI
-# colours them (see ui.NOTIFY): warnings yellow, errors red.
-_RE_WARN = re.compile(r"Warning", re.IGNORECASE)
-_RE_ERROR = re.compile(
-    r"QUITTING|Fail|error|denied|cannot|unable to|not permitted",
-    re.IGNORECASE)
 
 # nmap options that require raw sockets (root). Used to decide when to sudo.
 ROOT_FLAGS = {
@@ -182,6 +174,15 @@ class NmapBase(ReconModule):
     use_global = True        # prepend GLOBAL_FLAGS (custom mode sets its own)
     show_host_up = False     # only the ping mode reports host-up in the TUI
 
+    # --resolve-all noise is hidden; nmap's own error/warning lines are tagged.
+    # Patterns are anchored to how nmap actually reports these, so they can't
+    # match a port row's service banner (the buckets run before emit()).
+    HIDE = [r"Hostname .* resolves to \d+ IPs"]
+    ERROR = [r"QUITTING", r"(?i)^Failed\b", r"(?i)^Error\b", r"(?i)^dnet:",
+             r"(?i)^nmap: ", r"(?i)\bpermission denied\b",
+             r"(?i)\bnot permitted\b"]
+    WARN = [r"(?i)^Warning\b"]
+
     def nmap_flags(self):
         return (GLOBAL_FLAGS if self.use_global else []) + list(self.flags)
 
@@ -214,10 +215,12 @@ class NmapBase(ReconModule):
         argv += ["-oA", str(module_dir / self.name)]
         return [Command(argv)]
 
-    def display_line(self, line):
-        """Filter nmap's -vv output down to the events worth showing live -
-        open-port discoveries and host-up results - so the TUI isn't a wall of
-        scan noise. The full output still lands in <mode>.log regardless."""
+    def emit(self, line):
+        """Surface the notable events from nmap's -vv firehose - open-port
+        discoveries, per-host report rows (with -sV/-sC detail), and, for the
+        ping mode only, host-up results. Noise and failures are handled by the
+        HIDE/ERROR/WARN buckets before this runs; the full output still lands
+        in <mode>.log regardless."""
         m = _RE_PORT.search(line)
         if m:
             port, proto, host = m.groups()
@@ -241,12 +244,7 @@ class NmapBase(ReconModule):
             host = getattr(self, "_last_host", "?")
             reason = m.group(1)
             return f"[+] {host} is up" + (f" ({reason})" if reason else "")
-        if _RE_RESOLVE_WARN.search(line):
-            return None
-        if _RE_ERROR.search(line):
-            return f"[-] {line}"
-        if _RE_WARN.search(line):
-            return f"[!] {line}"
+        return None
         return None
 
     def adapt(self, module_dir):

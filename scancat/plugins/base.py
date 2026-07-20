@@ -50,27 +50,35 @@ _RECORD_KEYS = {
 }
 
 
-# Failure wording surfaced from any tool's output so errors/warnings never hide
-# behind a module's display filter (mirrors the nmap plugin's tagging). Word
-# boundaries keep hostnames like "failover.example.com" from tripping it.
-_RE_ERROR = re.compile(
-    r"\b(error|fail(?:ed|ure)?|fatal|exception|traceback|denied|refused|"
+# Opt-in wording sets a module can splice into its own ERROR/WARN buckets (see
+# ReconModule) or hand to notify_failure(). Nothing here is applied to any
+# module automatically. The inline (?i) makes them case-insensitive; word
+# boundaries keep hostnames like "failover.example.com" from tripping them.
+COMMON_ERRORS = (
+    r"(?i)\b(error|fail(?:ed|ure)?|fatal|exception|traceback|denied|refused|"
     r"timed out|timeout|unable to|cannot|not permitted|quitting)\b",
-    re.IGNORECASE)
-_RE_WARN = re.compile(r"\bwarn(?:ing)?\b", re.IGNORECASE)
+)
+COMMON_WARNINGS = (r"(?i)\bwarn(?:ing)?\b",)
+
+_COMMON_ERROR_RE = [re.compile(p) for p in COMMON_ERRORS]
+_COMMON_WARN_RE = [re.compile(p) for p in COMMON_WARNINGS]
+
+
+def _strip_marker(text):
+    """Drop a leading tool status token (e.g. theHarvester's "[!]") so a
+    notification tag we add doesn't stack on top of the tool's own."""
+    return re.sub(r"^\[.\]\s*", "", text.strip())
 
 
 def notify_failure(line):
-    """Return `line` tagged as an error ([-]) or warning ([!]) notification if
-    its wording signals trouble, else None. Recon plugins call this as a
-    fallback so a tool's failures aren't swallowed by their output filter."""
-    text = line.strip()
-    # Drop a leading tool status marker (e.g. theHarvester's "[!]") so our own
-    # notification tag doesn't stack on top of it.
-    text = re.sub(r"^\[.\]\s*", "", text)
-    if _RE_ERROR.search(text):
+    """Return `line` tagged [-]/[!] if it matches COMMON_ERRORS/COMMON_WARNINGS,
+    else None. A convenience for tools that decide severity inside emit() - e.g.
+    JSON parsers that only error-check a line once it fails to parse as data -
+    rather than through the declarative ERROR/WARN buckets."""
+    text = _strip_marker(line)
+    if any(rx.search(text) for rx in _COMMON_ERROR_RE):
         return f"[-] {text}"
-    if _RE_WARN.search(text):
+    if any(rx.search(text) for rx in _COMMON_WARN_RE):
         return f"[!] {text}"
     return None
 
@@ -130,6 +138,36 @@ class ReconModule:
     output_dir = None        # working dir under the subfolder; defaults to
                              # self.name, but modes can share one (e.g. nmap)
 
+    # --- live-display filtering (see display_line) -----------------------
+    # Declarative severity buckets: each is a list of regex patterns matched
+    # against a raw stdout line, in the fixed order HIDE, ERROR, WARN, INFO;
+    # the first bucket to match decides the line - HIDE drops it, the others
+    # tag the whole line. Entries are bare patterns, or (pattern, template)
+    # pairs whose template formats capture groups and carries its own tag.
+    # Nothing is applied unless a module opts in (write patterns, or splice in
+    # COMMON_ERRORS / COMMON_WARNINGS). FIND is the same idea for simple
+    # findings and is applied by the default emit().
+    HIDE = ()    # -> suppressed
+    ERROR = ()   # -> [-]
+    WARN = ()    # -> [!]
+    INFO = ()    # -> [*]
+    FIND = ()    # (pattern, "[+] {0}") pairs -> findings, via default emit()
+
+    _BUCKETS = (("HIDE", None), ("ERROR", "[-]"), ("WARN", "[!]"),
+                ("INFO", "[*]"))
+    _hide = _error = _warn = _info = _find = ()
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # Compile each configured bucket once per subclass. An entry is a bare
+        # pattern (tag the whole line) or a (pattern, template) pair.
+        for attr in ("HIDE", "ERROR", "WARN", "INFO", "FIND"):
+            compiled = []
+            for entry in getattr(cls, attr):
+                pat, tmpl = entry if isinstance(entry, tuple) else (entry, None)
+                compiled.append((re.compile(pat), tmpl))
+            setattr(cls, "_" + attr.lower(), compiled)
+
     def build(self, module_dir, domains):
         """Return the list of Command objects to run. `domains` is the
         subfolder's in-scope domains (from the datastore). Override in
@@ -144,11 +182,33 @@ class ReconModule:
         return {}
 
     def display_line(self, line):
-        """Map a raw stdout line to what the live display should show for it,
-        or None to suppress it. The default shows the line unchanged; noisy
-        tools (e.g. nmap) override this to surface only notable events. The
-        full raw output is always written to the module log regardless."""
-        return line
+        """Map a raw stdout line to what the live display should show, or None
+        to suppress it. Runs the declarative severity buckets in order (HIDE,
+        ERROR, WARN, INFO); if none claim the line, defers to emit() for a
+        finding. The full raw output is always written to the module log."""
+        if not line.strip():
+            return None
+        for attr, tag in self._BUCKETS:
+            for rx, tmpl in getattr(self, "_" + attr.lower()):
+                m = rx.search(line)
+                if not m:
+                    continue
+                if tag is None:                     # HIDE: drop it
+                    return None
+                if tmpl:
+                    return tmpl.format(*m.groups())
+                return f"{tag} {_strip_marker(line)}"
+        return self.emit(line)
+
+    def emit(self, line):
+        """Produce a finding line for output the severity buckets didn't claim
+        (any tagged string, typically "[+] ..."), or None to suppress it. The
+        default applies the FIND rules; override for JSON or stateful tools."""
+        for rx, tmpl in self._find:
+            m = rx.search(line)
+            if m:
+                return tmpl.format(*m.groups())
+        return None
 
     async def _persist(self, module_dir, store, lock, key, display, mlog):
         """Adapt the raw output and upsert it into the datastore. Called on

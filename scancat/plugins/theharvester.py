@@ -2,19 +2,14 @@
 import json
 import re
 
-from .base import (ReconModule, Command, normalize_host, ip_version,
-                   notify_failure)
+from .base import ReconModule, Command, normalize_host, ip_version
 
 SOURCES = ("all")
 
 # theHarvester prints results grouped under "[*] <Section> found: N" headers.
-# We only surface the sections that carry recon value; the rest (ASNs, urls,
-# social handles, ...) plus the banner and per-source progress are dropped.
+# The values under a section are printed bare; we only surface the ones that
+# carry recon value (hosts/ips/emails), tagged per _TH_SECTIONS.
 _RE_TH_SECTION = re.compile(r"^\[\*\]\s*(.+?) found:\s*(\d+)", re.I)
-_RE_TH_SEARCH = re.compile(r"^\[\*\]\s*Searching\b", re.I)
-# Logger lines carry an uppercase level token; drop the INFO ones. Case matters
-# so a lowercase host like "info.example.com" isn't swept up with them.
-_RE_TH_INFO = re.compile(r"\bINFO\b")
 # Map a shown section to the notification tag its values get in the TUI.
 _TH_SECTIONS = {"hosts": "[+]", "ips": "[+]", "emails": "[*]"}
 
@@ -23,6 +18,13 @@ class TheHarvesterModule(ReconModule):
     name = "theharvester"
     binary = "theHarvester"
     out_datatypes = ["host"]
+
+    # Drop INFO-level logger lines (case-sensitive so a lowercase host like
+    # "info.example.com" isn't swept up) and the per-source "[*] Searching X."
+    # progress spam. No error/warning wording matching: theHarvester already
+    # tags its own lines with [*]/[!], which emit() maps straight onto our
+    # scheme - more accurate than guessing from wording.
+    HIDE = [r"\bINFO\b", r"^\[\*\]\s*Searching\b"]
 
     def build(self, module_dir, domains):
         commands = []
@@ -33,36 +35,25 @@ class TheHarvesterModule(ReconModule):
             commands.append(Command(argv))
         return commands
 
-    def display_line(self, line):
-        # theHarvester is chatty: an ASCII banner, a "[*] Searching X." line per
-        # source, and result sections split by "----" rules. Track the current
-        # section from its "found:" header and only echo values under the ones
-        # worth showing (hosts/ips/emails); suppress everything else.
-        stripped = line.strip()
-        if not stripped:
-            return None
-        if _RE_TH_INFO.search(stripped):   # suppress INFO-level log lines
-            return None
-        m = _RE_TH_SECTION.match(stripped)
-        if m:
-            name = m.group(1).strip()
-            self._th_tag = _TH_SECTIONS.get(name.lower())
-            if self._th_tag:
-                return f"[*] {name} found: {m.group(2)}"
-            return None
-        if _RE_TH_SEARCH.match(stripped):
-            self._th_tag = None   # new search phase: no result section is active
-            return None
-        # Error/failure wording always wins, even inside a surfaced section, so
-        # a stray failure line isn't mislabeled as a finding.
-        failure = notify_failure(stripped)
-        if failure:
-            return failure
-        # Value line: only shown while inside a surfaced section. Header/banner
-        # lines never reach here as data because no section is active yet.
+    def emit(self, line):
+        # Pass theHarvester's own notification markers straight onto ours:
+        # [*] -> info, [!] -> warning, [-] -> error. Result values (hosts/ips/
+        # emails) are printed bare under a "[*] <Section> found: N" header, so
+        # track the section and surface only the useful ones as [+]/[*] data.
+        # The ASCII banner and "----" rules fall through to None.
+        s = line.strip()
+        if s.startswith("[*]"):
+            m = _RE_TH_SECTION.match(s)
+            if m:
+                self._th_tag = _TH_SECTIONS.get(m.group(1).strip().lower())
+            return f"[*] {s[3:].strip()}"
+        if s.startswith("[!]"):
+            return f"[!] {s[3:].strip()}"
+        if s.startswith("[-]"):
+            return f"[-] {s[3:].strip()}"
         tag = getattr(self, "_th_tag", None)
-        if tag and not stripped.startswith(("[", "*", "-", "=")):
-            return f"{tag} {stripped}"
+        if tag and not s.startswith(("[", "*", "-", "=")):
+            return f"{tag} {s}"
         return None
 
     def adapt(self, module_dir):
