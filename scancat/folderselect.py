@@ -9,6 +9,7 @@ from pathlib import Path
 import questionary
 from termcolor import colored
 
+from .config import disabled_modules
 from .menu import checkbox
 from .project import (PROJECT_FILE, DEFAULT_SUBFOLDERS,
                       load_project, new_project)
@@ -107,14 +108,18 @@ def select_scope(proj):
 
 
 def select_modules(proj, modules=None, attr="enabled_modules"):
-    """Interactive module picker. Defaults to the memorized selection (or
-    all modules enabled). `attr` is the Project field the selection persists to
-    (recon and scan remember their picks separately)."""
+    """Interactive module picker, shared by every phase (recon, scan, vuln).
+    Defaults to the memorized selection, else all modules except those disabled
+    in scancat.yml. `attr` is the Project field the selection persists to (each
+    phase remembers its picks separately)."""
     modules = MODULES if modules is None else modules
-    available = [m.name for m in modules]
-    default_enabled = getattr(proj, attr) or available
-    choices = [questionary.Choice(name, checked=(name in default_enabled))
-               for name in available]
+    # A saved project pick always wins. On a project's first run, everything is
+    # checked except the modules scancat.yml lists under disabled_modules.
+    disabled = disabled_modules()
+    default_enabled = getattr(proj, attr) or \
+        [m.name for m in modules if m.name not in disabled]
+    choices = [questionary.Choice(m.name, checked=(m.name in default_enabled))
+               for m in modules]
     enabled = checkbox("Select modules to run:", choices) or []
 
     setattr(proj, attr, enabled)

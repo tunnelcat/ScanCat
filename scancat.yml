@@ -1,0 +1,13 @@
+# ScanCat global config, shared by every project.
+#
+# Each project also keeps its own .scancat.yml that remembers the modules you
+# actually picked last time; those saved picks always win. The list below only
+# decides what starts UNCHECKED in the picker on a project's FIRST run.
+#
+# Everything is enabled by default. List a module here to leave it unchecked;
+# remove it to have it checked by default. Names apply across every phase
+# (recon, scan, vuln) - module names are unique.
+disabled_modules:
+  - nmap-tcp-1000
+  - nmap-udp-200
+  - nmap-custom
