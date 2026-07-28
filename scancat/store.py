@@ -113,8 +113,24 @@ CREATE TABLE IF NOT EXISTS emails (
     first_seen TEXT NOT NULL,
     last_seen  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS web_endpoints (
+    id             INTEGER PRIMARY KEY,
+    url            TEXT NOT NULL UNIQUE,   -- scheme://host:port (httpx result)
+    host_id        INTEGER REFERENCES hosts(id) ON DELETE SET NULL,  -- if probed by name
+    ip_id          INTEGER REFERENCES ips(id)   ON DELETE SET NULL,  -- host_ip it hit
+    port           INTEGER,
+    scheme         TEXT,                    -- http | https
+    status_code    INTEGER,
+    content_type   TEXT,
+    content_length INTEGER,
+    title          TEXT,
+    webserver      TEXT,
+    tech           TEXT,                    -- json array, e.g. ["Next.js","React"]
+    first_seen     TEXT NOT NULL,
+    last_seen      TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS observations (
-    entity_type TEXT NOT NULL,    -- 'host'|'ip'|'dns_record'|'resolution'|'email'|'port'|'script'
+    entity_type TEXT NOT NULL,    -- 'host'|'ip'|'dns_record'|'resolution'|'email'|'port'|'script'|'web'
     entity_id   INTEGER NOT NULL,
     tool        TEXT NOT NULL,
     first_seen  TEXT NOT NULL,
@@ -280,6 +296,29 @@ class SubfolderStore:
                 sid = self._upsert_script(conn, ipid, port_id, sc["script_id"],
                                           sc.get("output"), sc.get("data"), when)
                 self._observe(conn, "script", sid, tool, when)
+                n += 1
+            for w in records.get("web", []):
+                # Link the endpoint to its host (if probed by name) and the ip it
+                # hit; both are optional (extra={} leaves other columns intact).
+                hid = ipid = None
+                if w.get("host"):
+                    hid = self._upsert(conn, "hosts", ["name"], [w["host"]],
+                                       {}, when)
+                    self._observe(conn, "host", hid, tool, when)
+                if w.get("ip"):
+                    ipid = self._upsert(conn, "ips", ["address"], [w["ip"]],
+                                        {}, when)
+                    self._observe(conn, "ip", ipid, tool, when)
+                eid = self._upsert(
+                    conn, "web_endpoints", ["url"], [w["url"]],
+                    {"host_id": hid, "ip_id": ipid, "port": w.get("port"),
+                     "scheme": w.get("scheme"),
+                     "status_code": w.get("status_code"),
+                     "content_type": w.get("content_type"),
+                     "content_length": w.get("content_length"),
+                     "title": w.get("title"), "webserver": w.get("webserver"),
+                     "tech": w.get("tech")}, when)
+                self._observe(conn, "web", eid, tool, when)
                 n += 1
         return n
 

@@ -8,10 +8,11 @@ Note the binary collision: pip's `httpx` HTTP-client CLI installs as `httpx`
 too and often shadows ProjectDiscovery's on PATH. _resolve_httpx() finds the
 right one so the module works regardless of PATH order.
 """
+import json
 import os
 import subprocess
 
-from .base import BaseModule, Command
+from .base import BaseModule, Command, normalize_host, ip_version
 from ..store import SubfolderStore
 
 _httpx_bin = None   # memoized resolved path (or "" once we've looked and failed)
@@ -85,3 +86,51 @@ class HttpxModule(BaseModule):
         argv = [httpx_bin, "-l", str(in_file), "-silent", "-nc",
                 "-o", str(out_file), "-oa"]
         return [Command(argv)]
+
+    def adapt(self, module_dir):
+        # -oa writes the json sibling next to the plain url list. It's JSONL
+        # (one object per line); each is a web endpoint.
+        out_file = module_dir / "urlTargets-out.json"
+        if not out_file.exists():
+            return {}
+
+        hosts, dns, web = [], [], []
+        for line in out_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            url = d.get("url")
+            if not url:
+                continue
+            # "host" is a hostname when we probed name:port, an IP when ip:port;
+            # normalize_host keeps only valid FQDNs (IPs -> None).
+            host = normalize_host(d.get("host") or "")
+            if host:
+                hosts.append({"name": host})
+                # resolved A/AAAA -> ips + resolutions via the existing dns path.
+                for ip in (d.get("a") or []) + (d.get("aaaa") or []):
+                    ver = ip_version(ip)
+                    if ver:
+                        dns.append({"host": host, "value": ip,
+                                    "type": "A" if ver == 4 else "AAAA"})
+            endpoint_ip = d.get("host_ip")
+            if not (endpoint_ip and ip_version(endpoint_ip)):
+                endpoint_ip = None
+            try:
+                port = int(d.get("port"))
+            except (TypeError, ValueError):
+                port = None
+            tech = d.get("tech")
+            web.append({
+                "url": url, "host": host, "ip": endpoint_ip, "port": port,
+                "scheme": d.get("scheme"), "status_code": d.get("status_code"),
+                "content_type": d.get("content_type"),
+                "content_length": d.get("content_length"),
+                "title": d.get("title"), "webserver": d.get("webserver"),
+                "tech": json.dumps(tech) if tech else None,
+            })
+        return {"hosts": hosts, "dns": dns, "web": web}

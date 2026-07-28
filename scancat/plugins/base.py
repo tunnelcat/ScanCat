@@ -47,6 +47,7 @@ _RECORD_KEYS = {
     "ips":    lambda r: r["address"],
     "dns":    lambda r: (r["host"], r["type"], r["value"]),
     "emails": lambda r: r["address"],
+    "web":    lambda r: r["url"],
 }
 
 
