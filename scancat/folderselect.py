@@ -16,40 +16,59 @@ from .project import (PROJECT_FILE, DEFAULT_SUBFOLDERS,
 from .phases import RECON_MODULES
 
 
-def find_project(start_dir="."):
-    """Return the CLIENT folder holding a .scancat.yml, or None.
-
-    Checks the current directory first (you are inside a project), then one
-    level of subfolders (the current directory is a workspace of projects).
-    """
+def find_projects(start_dir="."):
+    """Project folders (those holding a .scancat.yml) one level under start_dir,
+    sorted by name. The workspace model: start_dir is a folder that holds one
+    client project per subfolder."""
     start = Path(start_dir).resolve()
-    if (start / PROJECT_FILE).exists():
-        return start
-    candidates = [d for d in sorted(start.iterdir())
-                  if d.is_dir() and (d / PROJECT_FILE).exists()]
-    if len(candidates) == 1:
-        return candidates[0]
-    if len(candidates) > 1:
-        choice = questionary.select(
-            "Multiple scancat projects found. Select one:",
-            choices=[d.name for d in candidates],
-        ).ask()
-        return (start / choice) if choice else None
-    return None
+    return [d for d in sorted(start.iterdir())
+            if d.is_dir() and (d / PROJECT_FILE).exists()]
+
+
+# Sentinel value for the "create a new project" entry in the selection menu.
+_NEW_PROJECT = object()
 
 
 def ensure_project(start_dir="."):
-    """Detect a project or offer to create one. Returns a loaded Project."""
-    root = find_project(start_dir)
-    if root:
-        proj = load_project(root)
+    """Return a loaded Project, detecting or creating one.
+
+    If start_dir is itself a project (has a .scancat.yml) it's loaded directly -
+    you cd'd into a project. Otherwise start_dir is treated as a workspace of
+    client projects: every project one level down is listed alongside a "create
+    new" option, so an existing project is never silently auto-loaded and making
+    a new one never means mkdir'ing and cd'ing yourself first.
+    """
+    start = Path(start_dir).resolve()
+    if (start / PROJECT_FILE).exists():
+        proj = load_project(start)
         print(colored(f"[+] Loaded project: {proj.client}", "green"))
         return proj
 
-    print(colored("[!] No scancat project found in this directory.", "yellow"))
-    if not questionary.confirm("Create a new project here?", default=True).ask():
-        print("No project. Exiting.")
-        raise SystemExit(1)
+    projects = find_projects(start)
+    if projects:
+        # "Create new" pinned first so it's always reachable without scrolling;
+        # search filter keeps hundreds of clients navigable (type to narrow, so
+        # jk-nav is off to free the letter keys for filtering).
+        choices = [questionary.Choice("+ Create new project", value=_NEW_PROJECT)]
+        choices += [questionary.Choice(d.name, value=d) for d in projects]
+        answer = questionary.select(
+            f"Scancat projects in {start.name}/ - select or type to filter:",
+            choices=choices, use_search_filter=True, use_jk_keys=False).ask()
+        if answer is None:
+            print("No project selected. Exiting.")
+            raise SystemExit(1)
+        if answer is not _NEW_PROJECT:
+            proj = load_project(answer)
+            print(colored(f"[+] Loaded project: {proj.client}", "green"))
+            return proj
+        # fall through to create a new one in this workspace
+    else:
+        print(colored("[!] No scancat projects found here.", "yellow"))
+        if not questionary.confirm("Create a new project here?",
+                                   default=True).ask():
+            print("No project. Exiting.")
+            raise SystemExit(1)
+
     return create_project(start_dir)
 
 
