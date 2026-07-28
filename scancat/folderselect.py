@@ -10,6 +10,7 @@ import questionary
 from termcolor import colored
 
 from .config import disabled_modules
+from .gridselect import grid_select
 from .menu import checkbox
 from .project import (PROJECT_FILE, DEFAULT_SUBFOLDERS,
                       load_project, new_project)
@@ -46,14 +47,12 @@ def ensure_project(start_dir="."):
 
     projects = find_projects(start)
     if projects:
-        # "Create new" pinned first so it's always reachable without scrolling;
-        # search filter keeps hundreds of clients navigable (type to narrow, so
-        # jk-nav is off to free the letter keys for filtering).
-        choices = [questionary.Choice("+ Create new project", value=_NEW_PROJECT)]
-        choices += [questionary.Choice(d.name, value=d) for d in projects]
-        answer = questionary.select(
-            f"Scancat projects in {start.name}/ - select or type to filter:",
-            choices=choices, use_search_filter=True, use_jk_keys=False).ask()
+        # "Create new" pinned first (top-left cell) so it's always reachable;
+        # grid_select lays the rest out in filterable columns for scale.
+        options = [("+ Create new project", _NEW_PROJECT)]
+        options += [(d.name, d) for d in projects]
+        answer = grid_select(
+            f"Scancat projects in {start.name}/", options)
         if answer is None:
             print("No project selected. Exiting.")
             raise SystemExit(1)
