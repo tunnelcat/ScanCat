@@ -7,7 +7,7 @@ in the subfolder datastore. Its adapter records each host's resolvability
 """
 import json
 
-from .base import (ReconModule, Command, normalize_host, ip_version,
+from .base import (BaseModule, Command, normalize_host, ip_version,
                    notify_failure)
 from ..store import SubfolderStore
 
@@ -17,7 +17,7 @@ from ..store import SubfolderStore
 QUERY_TYPES = ("a", "cname", "mx", "ns", "txt")
 
 
-class DnsxModule(ReconModule):
+class DnsxModule(BaseModule):
     name = "dnsx"
     binary = "dnsx"
     out_datatypes = ["dns"]

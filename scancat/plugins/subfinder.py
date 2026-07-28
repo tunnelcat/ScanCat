@@ -1,10 +1,10 @@
 """subfinder passive subdomain enumeration."""
 import json
 
-from .base import ReconModule, Command, normalize_host, notify_failure
+from .base import BaseModule, Command, normalize_host, notify_failure
 
 
-class SubfinderModule(ReconModule):
+class SubfinderModule(BaseModule):
     name = "subfinder"
     binary = "subfinder"
     out_datatypes = ["host"]

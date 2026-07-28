@@ -2,7 +2,7 @@
 import json
 import re
 
-from .base import ReconModule, Command, normalize_host, ip_version
+from .base import BaseModule, Command, normalize_host, ip_version
 
 SOURCES = ("all")
 
@@ -14,7 +14,7 @@ _RE_TH_SECTION = re.compile(r"^\[\*\]\s*(.+?) found:\s*(\d+)", re.I)
 _TH_SECTIONS = {"hosts": "[+]", "ips": "[+]", "emails": "[*]"}
 
 
-class TheHarvesterModule(ReconModule):
+class TheHarvesterModule(BaseModule):
     name = "theharvester"
     binary = "theHarvester"
     out_datatypes = ["host"]

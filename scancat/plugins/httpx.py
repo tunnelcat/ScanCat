@@ -4,11 +4,11 @@ Probes the host:port candidates gathered by recon/scan and records which ones
 actually serve HTTP/HTTPS. The url list (urlTargets-out.txt) feeds the web
 modules - nuclei-web, and gowitness before it.
 """
-from .base import ReconModule, Command
+from .base import BaseModule, Command
 from ..store import SubfolderStore
 
 
-class HttpxModule(ReconModule):
+class HttpxModule(BaseModule):
     """Probe every host:port candidate from the datastore (nmap's open TCP
     ports, expanded to each hostname that resolves to the IP) and keep the ones
     that actually speak HTTP/HTTPS as full URLs."""

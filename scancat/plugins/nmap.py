@@ -25,7 +25,7 @@ import re
 import shlex
 import xml.etree.ElementTree as ET
 
-from .base import ReconModule, Command, normalize_host
+from .base import BaseModule, Command, normalize_host
 from ..store import SubfolderStore
 
 # Applied to every preset mode; the custom mode overrides them with its own.
@@ -165,7 +165,7 @@ def _expand_targets(rows):
     return uniq
 
 
-class NmapBase(ReconModule):
+class NmapBase(BaseModule):
     binary = "nmap"
     module_class = "scan"
     out_datatypes = []       # scan output doesn't feed the recon dependency graph

@@ -51,7 +51,7 @@ _RECORD_KEYS = {
 
 
 # Opt-in wording sets a module can splice into its own ERROR/WARN buckets (see
-# ReconModule) or hand to notify_failure(). Nothing here is applied to any
+# BaseModule) or hand to notify_failure(). Nothing here is applied to any
 # module automatically. The inline (?i) makes them case-insensitive; word
 # boundaries keep hostnames like "failover.example.com" from tripping them.
 COMMON_ERRORS = (
@@ -128,7 +128,7 @@ class ModuleLog:
         self.file.close()
 
 
-class ReconModule:
+class BaseModule:
     name = "base"
     binary = None       # external tool required on PATH (None = no check)
     module_class = "recon"   # pipeline phase: "recon" | "scan" | "vuln"
