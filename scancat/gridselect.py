@@ -55,14 +55,24 @@ def grid_select(message, options, columns=None):
         idxs = _matches(labels, state["filter"])
         clamp(idxs)
         ncols, cell = dims(idxs)
-        out = [("bold", message + "\n"),
-               ("class:filter", f"  filter: {state['filter']}▏"),
+        # Typed filter is green when it matches something, red when it matches
+        # nothing; neutral cyan while empty.
+        typed = ("class:filter" if not state["filter"]
+                 else "class:match" if idxs else "class:nomatch")
+        out = [("class:title", message + "\n"),
+               ("class:filter", "  filter: "),
+               (typed, state["filter"]),
+               ("class:filter", "▏"),
                ("class:count", f"   {len(idxs)}/{len(labels)}\n\n")]
         for pos, i in enumerate(idxs):
             selected = pos == state["cursor"]
             if selected:
                 out.append(("[SetCursorPosition]", ""))
-            out.append(("class:sel" if selected else "", labels[i].ljust(cell)))
+            # First option (the pinned "+ Create new") gets a green accent so it
+            # stands out from the client cells, matching folderselect's greens.
+            base = "accent" if i == 0 else ""
+            style = "class:sel" if selected else ("class:" + base if base else "")
+            out.append((style, labels[i].ljust(cell)))
             if (pos + 1) % ncols == 0:
                 out.append(("", "\n"))
         if not idxs:
@@ -127,9 +137,18 @@ def grid_select(message, options, columns=None):
 
     control = FormattedTextControl(get_text, focusable=True, show_cursor=False)
     window = Window(control, wrap_lines=False, always_hide_cursor=True)
+    # Palette matches menu.py / folderselect: cyan #5fafff cursor, green #5faf5f
+    # accent, grey #808080 for chrome.
     style = Style.from_dict({
-        "filter": "bold", "count": "#888888", "dim": "#888888",
-        "help": "#888888", "sel": "reverse",
+        "title": "fg:#5fafff bold",              # cyan heading
+        "filter": "fg:#5fafff bold",             # cyan filter prompt
+        "count": "fg:#808080",                   # grey
+        "dim": "fg:#808080",
+        "help": "fg:#808080",
+        "accent": "fg:#5faf5f bold",             # green "create new"
+        "sel": "bg:#5fafff fg:#000000 bold",     # cyan highlight bar for cursor
+        "match": "fg:#5faf5f bold",              # green filter text (has matches)
+        "nomatch": "fg:#ff5f5f bold",            # red filter text (no matches)
     })
     app = Application(layout=Layout(HSplit([window])), key_bindings=kb,
                       style=style, full_screen=True, mouse_support=False)
