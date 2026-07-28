@@ -38,6 +38,7 @@ class Project:
     scope: list = field(default_factory=list)
     enabled_modules: list = field(default_factory=list)
     enabled_scan_modules: list = field(default_factory=list)
+    enabled_vuln_modules: list = field(default_factory=list)
     custom_scan_flags: str = ""
     scan_noise: list = field(
         default_factory=lambda: list(DEFAULT_SCAN_NOISE))
@@ -63,6 +64,7 @@ class Project:
             "scope": self.scope,
             "enabled_modules": self.enabled_modules,
             "enabled_scan_modules": self.enabled_scan_modules,
+            "enabled_vuln_modules": self.enabled_vuln_modules,
             "custom_scan_flags": self.custom_scan_flags,
             "scan_noise": self.scan_noise,
         }
@@ -83,6 +85,7 @@ def load_project(root):
         scope=data.get("scope", []) or [],
         enabled_modules=data.get("enabled_modules", []) or [],
         enabled_scan_modules=data.get("enabled_scan_modules", []) or [],
+        enabled_vuln_modules=data.get("enabled_vuln_modules", []) or [],
         custom_scan_flags=data.get("custom_scan_flags", "") or "",
         scan_noise=(data.get("scan_noise") or list(DEFAULT_SCAN_NOISE)),
     )

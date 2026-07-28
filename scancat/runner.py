@@ -1,6 +1,7 @@
-"""Module orchestration: run a set of modules against every in-scope subfolder
-concurrently, driving a single live display. Used for both the recon modules
-(MODULES, below) and the scan modules (scancat.plugins.nmap.SCAN_MODULES).
+"""Module orchestration engine for every phase: run a set of modules against
+every in-scope subfolder concurrently, driving a single live display and its
+keyboard controls. run_modules() is called by all three modes; each phase's
+module list lives in its own file (recon.py, scan.py, vuln.py).
 """
 import asyncio
 import base64
@@ -21,11 +22,6 @@ from rich.live import Live
 
 from .store import SubfolderStore
 from .ui import LiveDisplay
-from .plugins.subfinder import SubfinderModule
-from .plugins.theharvester import TheHarvesterModule
-from .plugins.dnsx import DnsxModule
-
-MODULES = [SubfinderModule, TheHarvesterModule, DnsxModule]
 
 
 def _term_snapshot():

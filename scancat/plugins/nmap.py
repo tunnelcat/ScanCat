@@ -50,7 +50,7 @@ ROOT_FLAGS = {
 }
 
 
-def _needs_root(flags):
+def needs_root(flags):
     return any(f in ROOT_FLAGS for f in flags)
 
 
@@ -187,7 +187,7 @@ class NmapBase(ReconModule):
         return (GLOBAL_FLAGS if self.use_global else []) + list(self.flags)
 
     def requires_root(self):
-        return _needs_root(self.flags)
+        return needs_root(self.flags)
 
     def build(self, module_dir, domains):
         # Targets/exclusions come straight from the scan scope, not `domains`
@@ -370,27 +370,3 @@ class NmapCustomModule(NmapBase):
         if not self.flags:
             return []
         return super().build(module_dir, domains)
-
-
-SCAN_MODULES = [
-    NmapPingModule,
-    NmapFastModule,
-    NmapTcp1000Module,
-    NmapTcpAllModule,
-    NmapUdp200Module,
-    NmapUdpSelectModule,
-    NmapCustomModule,
-]
-
-
-def scan_needs_root(enabled, proj):
-    """True if any enabled scan mode needs root (so scancat should prime sudo)."""
-    for cls in SCAN_MODULES:
-        if cls.name not in enabled:
-            continue
-        if cls is NmapCustomModule:
-            if _needs_root(shlex.split(proj.custom_scan_flags or "")):
-                return True
-        elif _needs_root(cls.flags):
-            return True
-    return False

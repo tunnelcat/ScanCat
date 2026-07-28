@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -10,10 +11,25 @@ from termcolor import colored
 from .banner import display_banner
 from .folderselect import (ensure_project, select_scope, select_modules,
                           select_scan_modules)
-from .recon import run_modules, MODULES
-from .plugins.nmap import SCAN_MODULES, scan_needs_root
+from .runner import run_modules
+from .phases import RECON_MODULES, SCAN_MODULES, VULN_MODULES
+from .plugins.nmap import NmapCustomModule, needs_root
 from .scope import cmd_scope, ensure_scope, ensure_scan_scope
 from .tools import warn_missing_tools
+
+
+def scan_needs_root(enabled, proj):
+    """True if any enabled scan mode needs root (so scancat should prime sudo).
+    Paired with _prime_sudo(): scan_mode() checks this, then primes sudo."""
+    for cls in SCAN_MODULES:
+        if cls.name not in enabled:
+            continue
+        if cls is NmapCustomModule:
+            if needs_root(shlex.split(proj.custom_scan_flags or "")):
+                return True
+        elif needs_root(cls.flags):
+            return True
+    return False
 
 
 def _prime_sudo():
@@ -48,7 +64,7 @@ def recon_mode(args, proj):
     if not active:
         print("No subfolders have targets in scope. Nothing to run.")
         return
-    asyncio.run(run_modules(proj, active, MODULES, enabled_modules))
+    asyncio.run(run_modules(proj, active, RECON_MODULES, enabled_modules))
 
 
 def scan_mode(args, proj):
@@ -77,12 +93,15 @@ def scan_mode(args, proj):
 
 
 def vuln_mode(args, proj):
-    if args.nuclei:
-        print("Running vulnerability scan with Nuclei - TODO")
-    if args.brute:
-        print("Running brute-force vulnerability scan - TODO")
-    if not (args.nuclei or args.brute):
-        print("Running vuln mode - TODO")
+    scope = select_scope(proj)
+    if not scope:
+        print("No subfolders in scope. Nothing to do.")
+        return
+    enabled_modules = select_modules(proj, VULN_MODULES, "enabled_vuln_modules")
+    if not enabled_modules:
+        print("No vuln modules selected. Nothing to run.")
+        return
+    asyncio.run(run_modules(proj, scope, VULN_MODULES, enabled_modules))
 
 
 def main():
@@ -103,10 +122,6 @@ def main():
     scan_parser.set_defaults(func=scan_mode)
 
     vuln_parser = subparsers.add_parser("vuln", help="Vulnerability assessment mode")
-    vuln_parser.add_argument("-n", "--nuclei", action="store_true",
-                             help="Run Nuclei-based vulnerability scan")
-    vuln_parser.add_argument("-b", "--brute", action="store_true",
-                             help="Run brute-force vulnerability scan")
     vuln_parser.set_defaults(func=vuln_mode)
 
     scope_parser = subparsers.add_parser(

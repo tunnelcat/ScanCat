@@ -175,6 +175,38 @@ class SubfolderStore:
             return [r[0] for r in
                     conn.execute("SELECT name FROM hosts ORDER BY name")]
 
+    def http_candidates(self):
+        """host:port / ip:port lines to probe with httpx, built from nmap's
+        open TCP ports - any port, so non-standard HTTP is included. Each open
+        port on an IPv4 address yields that ip:port plus hostname:port for every
+        host that resolves to the IP (from the resolutions table, i.e. dnsx/nmap
+        A answers). IPv6 is left out to keep this simple. Sorted, unique. Empty
+        if the db doesn't exist yet."""
+        if not self.path.exists():
+            return []
+        with self._connect() as conn:
+            ports = conn.execute(
+                "SELECT i.address, p.port FROM ports p "
+                "JOIN ips i ON i.id = p.ip_id "
+                "WHERE p.proto='tcp' AND p.state LIKE 'open%' "
+                "AND i.version = 4").fetchall()
+            res = conn.execute(
+                "SELECT i.address, h.name FROM resolutions r "
+                "JOIN ips i ON i.id = r.ip_id "
+                "JOIN hosts h ON h.id = r.host_id "
+                "WHERE i.version = 4").fetchall()
+
+        names_for_ip = {}
+        for addr, name in res:
+            names_for_ip.setdefault(addr, []).append(name)
+
+        out = set()
+        for addr, port in ports:
+            out.add(f"{addr}:{port}")
+            for name in names_for_ip.get(addr, []):
+                out.add(f"{name}:{port}")
+        return sorted(out)
+
     def upsert(self, records, tool, when=None):
         """Insert or update the intermediate `records` under provenance `tool`.
         Returns the number of entity rows touched."""

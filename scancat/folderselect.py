@@ -13,7 +13,7 @@ from .config import disabled_modules
 from .menu import checkbox
 from .project import (PROJECT_FILE, DEFAULT_SUBFOLDERS,
                       load_project, new_project)
-from .recon import MODULES
+from .phases import RECON_MODULES
 
 
 def find_project(start_dir="."):
@@ -112,7 +112,7 @@ def select_modules(proj, modules=None, attr="enabled_modules"):
     Defaults to the memorized selection, else all modules except those disabled
     in scancat.yml. `attr` is the Project field the selection persists to (each
     phase remembers its picks separately)."""
-    modules = MODULES if modules is None else modules
+    modules = RECON_MODULES if modules is None else modules
     # A saved project pick always wins. On a project's first run, everything is
     # checked except the modules scancat.yml lists under disabled_modules.
     disabled = disabled_modules()
@@ -132,7 +132,8 @@ def select_scan_modules(proj):
     """Scan (nmap) module picker. Same as select_modules, but if the custom
     mode is selected it also prompts for the nmap flags to run (remembered
     between runs); with no flags given, the custom mode is dropped."""
-    from .plugins.nmap import SCAN_MODULES, NmapCustomModule
+    from .phases import SCAN_MODULES
+    from .plugins.nmap import NmapCustomModule
 
     enabled = select_modules(proj, SCAN_MODULES, "enabled_scan_modules")
     if NmapCustomModule.name in enabled:

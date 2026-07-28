@@ -174,6 +174,11 @@ class ReconModule:
         subclasses."""
         raise NotImplementedError
 
+    def notice(self, message):
+        """Post a one-off message to this module's live pane (e.g. from build()
+        to explain why it has nothing to run). Only valid during run()."""
+        self._display.log(self._key, message)
+
     def adapt(self, module_dir):
         """Adapter hook: normalize this module's raw tool output (json/txt/xml)
         into the common intermediate schema (see scancat.store), which run()
@@ -232,6 +237,8 @@ class ReconModule:
             return
 
         self.proj = proj
+        self._display = display   # so build()/emit() can post a one-off notice
+        self._key = key
         subfolder_dir = proj.subfolder_path(sub)
         module_dir = subfolder_dir / (self.output_dir or self.name)
         module_dir.mkdir(parents=True, exist_ok=True)
