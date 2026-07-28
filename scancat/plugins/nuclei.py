@@ -21,7 +21,7 @@ class NucleiBase(BaseModule):
 
 class NucleiWebModule(NucleiBase):
     name = "nuclei-web"
-    depends_on = ["url"]   # runs on httpx's urlTargets-out.txt
+    depends_on = ["url"]   # runs on httpx's urlTargets-out
 
 
 class NucleiNetModule(NucleiBase):

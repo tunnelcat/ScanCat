@@ -1,7 +1,7 @@
 """httpx web-probe module (vuln phase).
 
 Probes the host:port candidates gathered by recon/scan and records which ones
-actually serve HTTP/HTTPS. The url list (urlTargets-out.txt) feeds the web
+actually serve HTTP/HTTPS. The url list (urlTargets-out) feeds the web
 modules - nuclei-web, and gowitness before it.
 
 Note the binary collision: pip's `httpx` HTTP-client CLI installs as `httpx`
@@ -75,10 +75,13 @@ class HttpxModule(BaseModule):
         if not candidates:
             self.notice("[!] no open ports in scancat.db yet - run scan first")
             return []
-        in_file = module_dir / "hostPorts-in.txt"
+        in_file = module_dir / "hostPorts-in"
         in_file.write_text("\n".join(candidates) + "\n")
 
-        out_file = module_dir / "urlTargets-out.txt"
+        # -o is the plain URL list (fed to nuclei-web/gowitness); -oa also dumps
+        # the json/csv/md formats beside it as urlTargets-out.{json,csv,md}.
+        # No .txt on the base, else httpx names the siblings urlTargets-out.txt.json.
+        out_file = module_dir / "urlTargets-out"
         argv = [httpx_bin, "-l", str(in_file), "-silent", "-nc",
-                "-o", str(out_file)]
+                "-o", str(out_file), "-oa"]
         return [Command(argv)]
