@@ -23,6 +23,7 @@ import ipaddress
 import json
 import re
 import shlex
+import subprocess
 import xml.etree.ElementTree as ET
 
 from .base import BaseModule, Command, normalize_host
@@ -30,6 +31,31 @@ from ..store import SubfolderStore
 
 # Applied to every preset mode; the custom mode overrides them with its own.
 GLOBAL_FLAGS = ["-vv", "--resolve-all", "--unique"]
+
+# Options nmap only understands from 7.90 on. An older binary rejects an
+# unknown option and exits before scanning anything, so these are probed once
+# against the installed nmap and dropped when unsupported (see _flag_supported).
+OPTIONAL_FLAGS = ("--resolve-all", "--unique")
+
+_flag_support = {}
+
+
+def _flag_supported(flag):
+    """True if the installed nmap accepts `flag`.
+
+    `nmap -h` doesn't list these options even on versions that support them, so
+    ask nmap itself: a list scan (-sL -n sends no packets and does no DNS)
+    exits 0 on a known flag and non-zero on an unrecognized one. Cached per
+    flag; if the probe can't run at all we treat the flag as unsupported, which
+    costs a flag rather than the whole scan."""
+    if flag not in _flag_support:
+        try:
+            proc = subprocess.run(["nmap", flag, "-sL", "-n", "127.0.0.1"],
+                                  capture_output=True, timeout=10)
+            _flag_support[flag] = proc.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            _flag_support[flag] = False
+    return _flag_support[flag]
 
 # Lines worth surfacing live from nmap's -vv firehose (see NmapBase.emit).
 _RE_PORT = re.compile(r"Discovered open port (\d+)/(\w+) on (\S+)")
@@ -184,7 +210,16 @@ class NmapBase(BaseModule):
     WARN = [r"(?i)^Warning\b"]
 
     def nmap_flags(self):
-        return (GLOBAL_FLAGS if self.use_global else []) + list(self.flags)
+        # Filter the whole list, so a custom mode asking for e.g. --unique on an
+        # old nmap is handled the same way as the global flags.
+        flags = (GLOBAL_FLAGS if self.use_global else []) + list(self.flags)
+        kept = [f for f in flags
+                if f not in OPTIONAL_FLAGS or _flag_supported(f)]
+        dropped = [f for f in flags if f not in kept]
+        if dropped:
+            self.notice(f"[!] nmap doesn't support {' '.join(dropped)}; "
+                        "running without it")
+        return kept
 
     def requires_root(self):
         return needs_root(self.flags)
@@ -244,7 +279,6 @@ class NmapBase(BaseModule):
             host = getattr(self, "_last_host", "?")
             reason = m.group(1)
             return f"[+] {host} is up" + (f" ({reason})" if reason else "")
-        return None
         return None
 
     def adapt(self, module_dir):

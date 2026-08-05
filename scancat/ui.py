@@ -86,6 +86,15 @@ class LiveDisplay:
         self.tasks[key]["end"] = time.monotonic()
         self.paused.discard(key)
 
+    def failed(self, key):
+        """A command exited nonzero or the module raised. Distinct from done so
+        a failure can't be mistaken for a clean run; the pane keeps the [-]
+        lines explaining it."""
+        self._finalize_pause(key)
+        self.tasks[key]["state"] = "failed"
+        self.tasks[key]["end"] = time.monotonic()
+        self.paused.discard(key)
+
     def begin_cancel(self):
         self.cancelling = True
 
@@ -292,6 +301,9 @@ class LiveDisplay:
             elif state == "cancelled":
                 status = Text("✗", style="red")
                 info = Text(f"[{self._runtime(t)}] CANCELLED", style="bold red")
+            elif state == "failed":
+                status = Text("✗", style="red")
+                info = Text(f"[{self._runtime(t)}] FAILED", style="bold red")
             else:  # pending
                 status = Text("·", style="grey50")
                 info = Text("[--:--]", style="grey50")
@@ -475,6 +487,7 @@ class LiveDisplay:
     _SUMMARY = {
         "done":      ("✓", "done",        "green"),
         "cancelled": ("✗", "stopped",     "red"),
+        "failed":    ("✗", "failed",      "red"),
         "running":   ("…", "interrupted", "yellow"),
         "missing":   ("[!]", "missing",   "yellow"),
         "waiting":   ("·", "not run",     "grey50"),

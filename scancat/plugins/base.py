@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import signal
+import traceback
 from datetime import datetime
 
 from ..store import SubfolderStore
@@ -175,10 +176,15 @@ class BaseModule:
         subclasses."""
         raise NotImplementedError
 
+    _display = None
+    _key = None
+
     def notice(self, message):
         """Post a one-off message to this module's live pane (e.g. from build()
-        to explain why it has nothing to run). Only valid during run()."""
-        self._display.log(self._key, message)
+        to explain why it has nothing to run). A no-op outside run(), so the
+        same code paths stay callable from tests and one-off scripts."""
+        if self._display is not None:
+            self._display.log(self._key, message)
 
     def adapt(self, module_dir):
         """Adapter hook: normalize this module's raw tool output (json/txt/xml)
@@ -252,6 +258,7 @@ class BaseModule:
         mlog.write(f"=== {self.name} started ===")
 
         display.start(key)
+        failed = False
         try:
             for cmd in self.build(module_dir, domains):
                 tee = open(cmd.tee, "w") if cmd.tee else None
@@ -288,8 +295,15 @@ class BaseModule:
                             tee.write(line + "\n")
                     await proc.wait()
                     if proc.returncode:
-                        mlog.write(f"[-] exited with code {proc.returncode}")
-                        display.log(key, f"[-] exited with code {proc.returncode}")
+                        # Keep going: with several commands (e.g. theHarvester
+                        # per domain) one failing shouldn't skip the rest, and
+                        # whatever did run is still worth adapting. The module
+                        # is marked failed at the end rather than done.
+                        failed = True
+                        msg = (f"[-] {cmd.argv[0]} exited with code "
+                               f"{proc.returncode}")
+                        mlog.write(msg)
+                        display.log(key, msg)
                 except asyncio.CancelledError:
                     # Resume first, in case the module was paused (SIGSTOP):
                     # a stopped process can't act on SIGTERM until continued.
@@ -324,6 +338,18 @@ class BaseModule:
             # Adapter: normalize raw output, then upsert into the subfolder
             # datastore. The lock serializes writes to the shared scancat.db.
             await self._persist(module_dir, store, lock, key, display, mlog)
-            display.done(key)
+            if failed:
+                display.failed(key)
+            else:
+                display.done(key)
+        except Exception as exc:
+            # A crash in build()/adapt() (bad flags, malformed output, a bug)
+            # would otherwise leave the row spinning forever with nothing said.
+            # CancelledError is a BaseException, so Ctrl+C still propagates.
+            msg = f"[-] {type(exc).__name__}: {exc}"
+            mlog.write(msg)
+            mlog.write(traceback.format_exc())   # full trace, log only
+            display.log(key, msg)
+            display.failed(key)
         finally:
             mlog.close()

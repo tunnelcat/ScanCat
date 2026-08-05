@@ -238,7 +238,8 @@ async def run_modules(proj, scope, modules, enabled_modules=None):
     def _settled(key):
         # Terminal for the 'finished' review state: a reached end-state, or a
         # started task that is done (covers a crash that left no end-state).
-        if display.tasks[key]["state"] in ("done", "cancelled", "missing", "stub"):
+        if display.tasks[key]["state"] in ("done", "cancelled", "missing",
+                                           "stub", "failed"):
             return True
         t = tasks.get(key)
         return t is not None and t.done()
