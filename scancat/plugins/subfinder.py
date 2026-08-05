@@ -11,6 +11,9 @@ class SubfinderModule(BaseModule):
 
     def build(self, module_dir, domains):
         # Seed subfinder from the subfolder's in-scope domains.
+        if not domains:
+            self.notice("[!] no in-scope domains in the recon scope")
+            return []
         list_file = module_dir / "subfinder-in.txt"
         list_file.write_text("\n".join(domains) + ("\n" if domains else ""))
         argv = ["subfinder", "-silent", "-nc", "-all", "-dL", str(list_file),

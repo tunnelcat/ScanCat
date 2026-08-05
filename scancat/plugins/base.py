@@ -178,11 +178,17 @@ class BaseModule:
 
     _display = None
     _key = None
+    _mlog = None
+    _noticed = False
 
     def notice(self, message):
-        """Post a one-off message to this module's live pane (e.g. from build()
-        to explain why it has nothing to run). A no-op outside run(), so the
-        same code paths stay callable from tests and one-off scripts."""
+        """Post a one-off message to this module's live pane and log (e.g. from
+        build() to explain why it has nothing to run). Writing to the pane is a
+        no-op outside run(), so the same code paths stay callable from tests and
+        one-off scripts."""
+        self._noticed = True
+        if self._mlog is not None:
+            self._mlog.write(message)
         if self._display is not None:
             self._display.log(self._key, message)
 
@@ -256,11 +262,24 @@ class BaseModule:
 
         mlog = ModuleLog(module_dir / f"{self.name}.log")
         mlog.write(f"=== {self.name} started ===")
+        self._mlog = mlog         # so notice() lands in the log as well
 
         display.start(key)
         failed = False
         try:
-            for cmd in self.build(module_dir, domains):
+            commands = self.build(module_dir, domains)
+            if not commands:
+                # build() found nothing to do (no targets, no input, tool
+                # unusable). Most modules explain why via notice(); the fallback
+                # keeps the pane from going quiet if one doesn't, and either way
+                # the row isn't a green DONE for a module that never ran.
+                if not self._noticed:
+                    mlog.write("[*] nothing to run")
+                    display.log(key, "[*] nothing to run")
+                display.skipped(key)
+                return
+
+            for cmd in commands:
                 tee = open(cmd.tee, "w") if cmd.tee else None
                 mlog.write(f"$ {' '.join(cmd.argv)}")
                 try:

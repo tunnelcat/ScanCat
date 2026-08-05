@@ -231,6 +231,7 @@ class NmapBase(BaseModule):
         rows = store.scope_active("scan")
         targets = _expand_targets([r for r in rows if r["include"]])
         if not targets:
+            self.notice("[!] no in-scope targets in the scan scope")
             return []
         excludes = _expand_targets([r for r in rows if not r["include"]])
 
@@ -400,7 +401,13 @@ class NmapCustomModule(NmapBase):
 
     def build(self, module_dir, domains):
         raw = (getattr(self.proj, "custom_scan_flags", "") or "").strip()
-        self.flags = shlex.split(raw)
+        try:
+            self.flags = shlex.split(raw)
+        except ValueError as exc:
+            # e.g. an unbalanced quote in the flags the user typed
+            self.notice(f"[-] can't parse the custom nmap flags: {exc}")
+            return []
         if not self.flags:
+            self.notice("[!] no custom nmap flags set")
             return []
         return super().build(module_dir, domains)

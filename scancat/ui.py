@@ -86,6 +86,14 @@ class LiveDisplay:
         self.tasks[key]["end"] = time.monotonic()
         self.paused.discard(key)
 
+    def skipped(self, key):
+        """Nothing to run (no targets, no input, tool unusable). Not a failure,
+        but not a clean run either, so it doesn't get a green DONE."""
+        self._finalize_pause(key)
+        self.tasks[key]["state"] = "skipped"
+        self.tasks[key]["end"] = time.monotonic()
+        self.paused.discard(key)
+
     def failed(self, key):
         """A command exited nonzero or the module raised. Distinct from done so
         a failure can't be mistaken for a clean run; the pane keeps the [-]
@@ -304,6 +312,9 @@ class LiveDisplay:
             elif state == "failed":
                 status = Text("✗", style="red")
                 info = Text(f"[{self._runtime(t)}] FAILED", style="bold red")
+            elif state == "skipped":
+                status = Text("·", style="grey50")
+                info = Text("skipped", style="grey50")
             else:  # pending
                 status = Text("·", style="grey50")
                 info = Text("[--:--]", style="grey50")
@@ -488,6 +499,7 @@ class LiveDisplay:
         "done":      ("✓", "done",        "green"),
         "cancelled": ("✗", "stopped",     "red"),
         "failed":    ("✗", "failed",      "red"),
+        "skipped":   ("·", "skipped",     "grey50"),
         "running":   ("…", "interrupted", "yellow"),
         "missing":   ("[!]", "missing",   "yellow"),
         "waiting":   ("·", "not run",     "grey50"),

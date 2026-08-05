@@ -27,6 +27,9 @@ class TheHarvesterModule(BaseModule):
     HIDE = [r"\bINFO\b", r"^\[\*\]\s*Searching\b"]
 
     def build(self, module_dir, domains):
+        if not domains:
+            self.notice("[!] no in-scope domains in the recon scope")
+            return []
         commands = []
         for domain in domains:
             filename = f"theHarvester-{domain.replace('.', '-')}"

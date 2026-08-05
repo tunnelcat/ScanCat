@@ -30,8 +30,10 @@ class DnsxModule(BaseModule):
         entries = set(domains)
         store = SubfolderStore(module_dir.parent / "scancat.db")
         entries.update(store.host_names())
-        list_file.write_text("\n".join(sorted(entries))
-                            + ("\n" if entries else ""))
+        if not entries:
+            self.notice("[!] no domains or hosts to resolve yet")
+            return []
+        list_file.write_text("\n".join(sorted(entries)) + "\n")
 
         argv = ["dnsx", "-l", str(list_file), "-silent", "-resp", "-nc",
                 "-json", "-or", "-o", str(module_dir / "dnsx-out.json")]
