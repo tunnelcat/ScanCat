@@ -37,25 +37,42 @@ GLOBAL_FLAGS = ["-vv", "--resolve-all", "--unique"]
 # against the installed nmap and dropped when unsupported (see _flag_supported).
 OPTIONAL_FLAGS = ("--resolve-all", "--unique")
 
+# sudo declining to run (no cached credentials, user not a sudoer). Tells the
+# probe below its non-zero exit came from sudo rather than from nmap.
+_RE_SUDO_REFUSED = re.compile(r"(?i)^sudo:", re.M)
+
 _flag_support = {}
 
 
-def _flag_supported(flag):
-    """True if the installed nmap accepts `flag`.
+def _flag_supported(flag, prefix=()):
+    """True if the nmap that will actually run accepts `flag`.
 
     `nmap -h` doesn't list these options even on versions that support them, so
     ask nmap itself: a list scan (-sL -n sends no packets and does no DNS)
-    exits 0 on a known flag and non-zero on an unrecognized one. Cached per
-    flag; if the probe can't run at all we treat the flag as unsupported, which
-    costs a flag rather than the whole scan."""
-    if flag not in _flag_support:
+    exits 0 on a known flag and non-zero on an unrecognized one.
+
+    `prefix` is the launcher the real command uses (["sudo", "-n"] for the raw
+    scan modes). Probing through it matters: sudo resolves the binary via its
+    own secure_path, so `sudo nmap` can be a different, older build than the
+    `nmap` first on your PATH - probe the wrong one and the scan still dies on
+    the flag. If sudo itself refuses (creds not primed) we learn nothing about
+    nmap, so that falls back to probing directly. Cached per (prefix, flag);
+    when the probe can't run at all the flag is dropped, which costs a flag
+    rather than the whole scan."""
+    key = (tuple(prefix), flag)
+    if key not in _flag_support:
         try:
-            proc = subprocess.run(["nmap", flag, "-sL", "-n", "127.0.0.1"],
-                                  capture_output=True, timeout=10)
-            _flag_support[flag] = proc.returncode == 0
+            proc = subprocess.run(
+                list(prefix) + ["nmap", flag, "-sL", "-n", "127.0.0.1"],
+                capture_output=True, text=True, timeout=10)
+            out = (proc.stdout or "") + (proc.stderr or "")
+            if proc.returncode != 0 and prefix and _RE_SUDO_REFUSED.search(out):
+                return _flag_supported(flag)     # sudo's problem, not nmap's
+            _flag_support[key] = proc.returncode == 0
         except (OSError, subprocess.SubprocessError):
-            _flag_support[flag] = False
-    return _flag_support[flag]
+            _flag_support[key] = False
+    return _flag_support[key]
+
 
 # Lines worth surfacing live from nmap's -vv firehose (see NmapBase.emit).
 _RE_PORT = re.compile(r"Discovered open port (\d+)/(\w+) on (\S+)")
@@ -209,15 +226,26 @@ class NmapBase(BaseModule):
              r"(?i)\bnot permitted\b"]
     WARN = [r"(?i)^Warning\b"]
 
+    def launcher(self):
+        """Command prefix nmap runs behind. Raw scans (-sS/-sU/-O/...) need root:
+        creds are primed before the run, so -n fails fast instead of hanging on
+        a prompt inside the TUI."""
+        if self.requires_root() and getattr(self.proj, "use_sudo", False):
+            return ["sudo", "-n"]
+        return []
+
     def nmap_flags(self):
         # Filter the whole list, so a custom mode asking for e.g. --unique on an
-        # old nmap is handled the same way as the global flags.
+        # old nmap is handled the same way as the global flags. Probe through
+        # the same launcher build() will use, or we may test a different binary
+        # than the one that runs.
         flags = (GLOBAL_FLAGS if self.use_global else []) + list(self.flags)
+        prefix = self.launcher()
         kept = [f for f in flags
-                if f not in OPTIONAL_FLAGS or _flag_supported(f)]
+                if f not in OPTIONAL_FLAGS or _flag_supported(f, prefix)]
         dropped = [f for f in flags if f not in kept]
         if dropped:
-            self.notice(f"[!] nmap doesn't support {' '.join(dropped)}; "
+            self.notice(f"[!] this nmap doesn't support {' '.join(dropped)}; "
                         "running without it")
         return kept
 
@@ -240,10 +268,8 @@ class NmapBase(BaseModule):
         targets_file = module_dir / f"{self.name}.targets"
         targets_file.write_text("\n".join(targets) + "\n")
 
-        argv = []
-        if self.requires_root() and getattr(self.proj, "use_sudo", False):
-            argv = ["sudo", "-n"]   # creds primed before the run; fail fast, no hang
-        argv += ["nmap"] + self.nmap_flags() + ["-iL", str(targets_file)]
+        argv = self.launcher() + ["nmap"] + self.nmap_flags()
+        argv += ["-iL", str(targets_file)]
         if excludes:
             excludes_file = module_dir / f"{self.name}.excludes"
             excludes_file.write_text("\n".join(excludes) + "\n")

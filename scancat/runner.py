@@ -215,10 +215,31 @@ async def run_modules(proj, scope, modules, enabled_modules=None):
 
     tasks = {}   # key -> current asyncio task
 
+    def _reconcile(key, task):
+        """Make the display agree with reality once a module's task ends.
+
+        A module normally reaches its own end state (done/failed/skipped/...).
+        This is the backstop for when it can't: an exception escaping run(), or
+        a run() override that forgets to set one. Without it the task is over
+        but the row keeps spinning with a live timer while the footer already
+        says every module finished."""
+        if task.cancelled():
+            return                      # the cancel path sets its own state
+        exc = task.exception()
+        if exc is not None:
+            display.log(key, f"[-] {type(exc).__name__}: {exc}")
+        elif display.tasks[key]["state"] not in ("running", "waiting"):
+            return                      # module reported its own outcome
+        else:
+            display.log(key, "[-] stopped without reporting a result")
+        display.failed(key)
+
     def start_module(key):
         module_cls, sub = module_by_key[key]
-        tasks[key] = asyncio.create_task(
+        task = asyncio.create_task(
             module_cls().run(key, display, proj, sub, locks[sub]))
+        task.add_done_callback(lambda t, k=key: _reconcile(k, t))
+        tasks[key] = task
 
     def _deps_ready(key):
         # A deferred module is ready once every module of its awaited class(es)
