@@ -176,6 +176,7 @@ class BaseModule:
         subclasses."""
         raise NotImplementedError
 
+    debug = False            # --debug: show every line, unfiltered
     _display = None
     _key = None
     _mlog = None
@@ -206,6 +207,10 @@ class BaseModule:
         finding. The full raw output is always written to the module log."""
         if not line.strip():
             return None
+        if self.debug:
+            # --debug: show the tool's output verbatim. No buckets, no emit(),
+            # no tags, so what's on screen is exactly what the tool printed.
+            return line.rstrip()
         for attr, tag in self._BUCKETS:
             for rx, tmpl in getattr(self, "_" + attr.lower()):
                 m = rx.search(line)
@@ -282,6 +287,9 @@ class BaseModule:
             for cmd in commands:
                 tee = open(cmd.tee, "w") if cmd.tee else None
                 mlog.write(f"$ {' '.join(cmd.argv)}")
+                if self.debug:
+                    # The exact argv is usually what you opened --debug for.
+                    display.log(key, f"$ {' '.join(cmd.argv)}")
                 try:
                     proc = await asyncio.create_subprocess_exec(
                         *cmd.argv,

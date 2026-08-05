@@ -25,9 +25,10 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 class LiveDisplay:
-    def __init__(self, scope_label, phase="recon"):
+    def __init__(self, scope_label, phase="recon", debug=False):
         self.scope_label = scope_label
         self.phase = phase       # "recon" | "scan" | "vuln"; shown in the header
+        self.debug = debug       # --debug run; flagged in the header
         self.console = Console()
         self.tasks = {}          # key -> state dict
         self.order = []          # keys in insertion order
@@ -461,6 +462,8 @@ class LiveDisplay:
 
     def _render(self):
         header = Text(f"scancat {self.phase}  scope [{self.scope_label}]", style="bold")
+        if self.debug:
+            header.append("  DEBUG", style="bold yellow")
         hint = self._hint()
 
         # header(1) + table header(1) + table rule(1) + hint(1) + 1 safety

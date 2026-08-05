@@ -184,10 +184,10 @@ def _install_key_reader(loop, display, handlers):
     return cleanup
 
 
-async def run_modules(proj, scope, modules, enabled_modules=None):
+async def run_modules(proj, scope, modules, enabled_modules=None, debug=False):
     # Modules in a run share a phase (recon/scan/vuln); label the TUI with it.
     phase = modules[0].module_class if modules else "recon"
-    display = LiveDisplay(",".join(scope), phase=phase)
+    display = LiveDisplay(",".join(scope), phase=phase, debug=debug)
     # Rich owns the single refresh timer (auto_refresh); the display object
     # is itself the renderable, so there's no second timer to race -> no
     # flicker, and the frame paints immediately instead of only on exit.
@@ -236,8 +236,10 @@ async def run_modules(proj, scope, modules, enabled_modules=None):
 
     def start_module(key):
         module_cls, sub = module_by_key[key]
+        module = module_cls()
+        module.debug = debug     # unfiltered output for this run
         task = asyncio.create_task(
-            module_cls().run(key, display, proj, sub, locks[sub]))
+            module.run(key, display, proj, sub, locks[sub]))
         task.add_done_callback(lambda t, k=key: _reconcile(k, t))
         tasks[key] = task
 

@@ -64,7 +64,8 @@ def recon_mode(args, proj):
     if not active:
         print("No subfolders have targets in scope. Nothing to run.")
         return
-    asyncio.run(run_modules(proj, active, RECON_MODULES, enabled_modules))
+    asyncio.run(run_modules(proj, active, RECON_MODULES, enabled_modules,
+                            debug=args.debug))
 
 
 def scan_mode(args, proj):
@@ -89,7 +90,8 @@ def scan_mode(args, proj):
                           "scan starts.", "red"))
             return
         proj.use_sudo = True
-    asyncio.run(run_modules(proj, active, SCAN_MODULES, enabled_modules))
+    asyncio.run(run_modules(proj, active, SCAN_MODULES, enabled_modules,
+                            debug=args.debug))
 
 
 def vuln_mode(args, proj):
@@ -101,7 +103,8 @@ def vuln_mode(args, proj):
     if not enabled_modules:
         print("No vuln modules selected. Nothing to run.")
         return
-    asyncio.run(run_modules(proj, scope, VULN_MODULES, enabled_modules))
+    asyncio.run(run_modules(proj, scope, VULN_MODULES, enabled_modules,
+                            debug=args.debug))
 
 
 def main():
@@ -115,13 +118,22 @@ def main():
         dest="mode", required=True,
         help="Mode of operation: recon, scan, or vuln")
 
-    recon_parser = subparsers.add_parser("recon", help="Recon mode")
+    # Shared by the three module-running modes: show every line the tools print
+    # instead of the curated findings (see BaseModule.display_line).
+    debug_opt = argparse.ArgumentParser(add_help=False)
+    debug_opt.add_argument("-d", "--debug", action="store_true",
+                           help="show every line the tools print, unfiltered")
+
+    recon_parser = subparsers.add_parser("recon", help="Recon mode",
+                                         parents=[debug_opt])
     recon_parser.set_defaults(func=recon_mode)
 
-    scan_parser = subparsers.add_parser("scan", help="Scan mode")
+    scan_parser = subparsers.add_parser("scan", help="Scan mode",
+                                        parents=[debug_opt])
     scan_parser.set_defaults(func=scan_mode)
 
-    vuln_parser = subparsers.add_parser("vuln", help="Vulnerability assessment mode")
+    vuln_parser = subparsers.add_parser("vuln", help="Vulnerability assessment mode",
+                                        parents=[debug_opt])
     vuln_parser.set_defaults(func=vuln_mode)
 
     scope_parser = subparsers.add_parser(
